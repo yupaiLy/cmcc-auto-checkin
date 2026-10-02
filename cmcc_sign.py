@@ -271,9 +271,12 @@ def exchange_session(cfg: Config) -> tuple[requests.Session, str]:
     assert_safe_url(data["url"], allowed_hosts={"wx.10086.cn"})
     r = s.get(data["url"], timeout=30, allow_redirects=False)
     r.raise_for_status()
-    if "QWHD_SESSION_TOKEN" not in s.cookies:
-        raise RuntimeError("未取得 QWHD_SESSION_TOKEN，会话兑换失败")
-    log.info("活动会话建立成功（QWHD_SESSION_TOKEN=%.12s...）", s.cookies["QWHD_SESSION_TOKEN"])
+    # 不同 hub 落不同令牌名（qwhdhub → QWHD_SESSION_TOKEN，hlwyxhdhub → HLWHD_SESSION_TOKEN），
+    # 同一 jwt 跨 hub 通用，故按后缀匹配
+    if not any(n.endswith("SESSION_TOKEN") for n in s.cookies.keys()):
+        raise RuntimeError("未取得活动会话令牌，会话兑换失败")
+    token_name = next(n for n in s.cookies.keys() if n.endswith("SESSION_TOKEN"))
+    log.info("活动会话建立成功（%s=%.12s...）", token_name, s.cookies[token_name])
     return s, data["url"]
 
 
@@ -370,7 +373,7 @@ def notify(cfg: Config, title: str, detail: str):
 
 # ---------------------------------------------------------------- 主流程
 
-def run(cfg: Config, dry_run: bool, claim: bool) -> int:
+def run(cfg: Config, dry_run: bool, claim: bool, tasks: bool = False, games: bool = False) -> int:
     today = datetime.now().strftime("%Y%m%d")
 
     # 重建会话的兜底：第一次失败若是会话问题，重建后再试一次
@@ -436,6 +439,28 @@ def run(cfg: Config, dry_run: bool, claim: bool) -> int:
         except Exception as e:
             lines.append(f"[领奖] 尝试失败: {e}")
 
+    # 拓展活动（可选模块 cmcc_extra.py，缺失时静默跳过）
+    if tasks or games:
+        try:
+            import cmcc_extra
+        except ImportError:
+            lines.append("[拓展] 未找到 cmcc_extra.py，已跳过")
+        else:
+            if tasks:
+                try:
+                    line = cmcc_extra.run_mark_tasks(s, referer, cfg, dry_run)
+                    log.info("[AI豆任务] %s", line)
+                    lines.append(f"[AI豆任务] {line}")
+                except Exception as e:
+                    lines.append(f"[AI豆任务] 失败: {e}")
+            if games:
+                try:
+                    for line in cmcc_extra.run_games(cfg, dry_run):
+                        log.info("[拓展活动] %s", line)
+                        lines.append(f"[拓展] {line}")
+                except Exception as e:
+                    lines.append(f"[拓展活动] 失败: {e}")
+
     summary = "\n".join(lines)
     log.info("\n%s", summary)
     notify(cfg, "移动签到通知", f"{summary}\n手机尾号 {cfg.phone[-4:]}")
@@ -447,6 +472,10 @@ def main() -> int:
     parser.add_argument("--config", default="config.json", help="配置文件路径（默认 config.json）")
     parser.add_argument("--dry-run", action="store_true", help="只查询状态，不执行签到")
     parser.add_argument("--claim", action="store_true", help="签到后尝试领取连签奖励")
+    parser.add_argument("--tasks", action="store_true",
+                        help="顺带完成签到页 AI豆任务（需 cmcc_extra.py）")
+    parser.add_argument("--games", action="store_true",
+                        help="跑拓展活动：周六游戏中心/追剧/抽话费页的打卡+任务+抽奖（需 cmcc_extra.py）")
     parser.add_argument("--delay", type=int, default=0, metavar="N", help="启动前随机延迟 0~N 秒")
     args = parser.parse_args()
 
@@ -467,7 +496,8 @@ def main() -> int:
         return 1
 
     try:
-        return run(cfg, dry_run=args.dry_run, claim=args.claim)
+        return run(cfg, dry_run=args.dry_run, claim=args.claim,
+                   tasks=args.tasks, games=args.games)
     except Exception as e:
         log.exception("执行失败: %s", e)
         notify(cfg, "移动签到异常", f"{e}\n手机尾号 {cfg.phone[-4:] if cfg.phone else '????'}")

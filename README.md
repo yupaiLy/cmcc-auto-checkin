@@ -8,6 +8,7 @@
 | 文件 | 说明 |
 |------|------|
 | `cmcc_sign.py` | 主脚本 |
+| `cmcc_extra.py` | 可选拓展模块：代币任务 / AI豆任务 / 抽奖消耗（`--tasks` / `--games`） |
 | `config.example.json` | 配置模板，复制为 `config.json` 后填写 |
 | `.cmcc_jwt_cache_<尾号>.json` | 运行后按账号自动生成的 jwt 凭证缓存（勿外传） |
 | `images/app-token-capture.png` | app_token 抓包位置示例图 |
@@ -21,7 +22,12 @@ python3 cmcc_sign.py                 # 签到
 python3 cmcc_sign.py --dry-run       # 只查状态
 python3 cmcc_sign.py --claim         # 签到后顺带尝试领连签奖励
 python3 cmcc_sign.py --delay 600     # 随机延迟 0~600 秒执行（防风控）
+python3 cmcc_sign.py --tasks         # 签到 + 顺带领签到页 AI豆任务
+python3 cmcc_sign.py --games         # 三拓展活动：打卡 + 代币任务 + 到窗口自动抽奖
+python3 cmcc_sign.py --games --dry-run   # 只报各活动状态与余额，零消耗
 ```
+
+`--tasks` / `--games` 依赖同目录的 `cmcc_extra.py`（缺失时自动跳过并提示，不影响主签到）。
 
 配置也可用环境变量覆盖（适合 CI）：`CMCC_APP_TOKEN`、`CMCC_PHONE`、
 `CMCC_PROVINCE_CODE`、`CMCC_CITY_CODE`、`CMCC_ACTIVITY_ID` 等。
@@ -92,6 +98,24 @@ jobs:
 - **Server酱**：填 `serverchan_sendkey`，签到结果推送到微信；
 - **Bark**（iOS）：填 `bark_url`（形如 `https://api.day.app/你的key`）。
 
+## 拓展活动（可选，`cmcc_extra.py`）
+
+同一 SSO 通道（wx.10086.cn / qwhdhub）下还有三类收益，凭证与会话完全复用主脚本
+（jwt 续期缓存同样生效），通过 `--tasks` / `--games` 开启：
+
+| 体系 | 内容 | 开关 |
+|------|------|------|
+| mark/task | 签到页 AI豆任务（到访 + finish + 领奖，57 项中约 1/3 可纯 HTTP 完成） | `--tasks` |
+| diyTask | 三活动页代币任务（browse/share 等类型服务端不校验真实行为） | `--games` |
+| diyLottery | 抽奖消耗：周六游戏中心（游戏币 10/次，周六 12:00 起奖池拓展）、追剧领福利（次数 1/抽，仅周日开放） | `--games` |
+
+抽奖内置**窗口闸门**：非窗口日只报余额不消耗（游戏币攒到周六拓展池一次抽光，
+币按 31 天周期清零），到窗口才真扣；幂等由服务端余额保证，重复运行不多扣资产。
+`--dry-run` 下全部只读，零消耗。
+
+活动页 URL / 组件 ID 写在 `cmcc_extra.py` 的 `ACTS` 注册表里，属公开配置；
+不同省份入口不同时替换 query 参数即可。
+
 ## 实现说明（接口链路）
 
 ```
@@ -101,6 +125,17 @@ GET  <活动页?token=QWHDSSOD...>              → Set-Cookie: QWHD_SESSION_TOK
 POST /qwhdhub/api/mark/mark31/markstatus {}  → 查签到状态（幂等）
 POST /qwhdhub/api/mark/mark31/domark         → {"date":"YYYYMMDD"} 执行签到
 POST /qwhdhub/api/mark/mark31/taskAward/<id> → 领连签奖励（--claim）
+```
+
+拓展活动（`cmcc_extra.py`）：
+
+```
+POST /qwhdhub/api/mark/task/taskList         → AI豆任务清单（--tasks）
+POST /qwhdhub/api/mark/task/finishTask       → 完成（服务端最小校验=到访+Referer，前端 sign 不校验）
+GET  /qwhdhub/diyTask/list/<componentId>     → 代币任务清单
+POST /qwhdhub/diyTask/finish/<taskId>        → 空 body 即发币
+POST /qwhdhub/diyLottery/period/remain/<id>  → 抽奖余额预检（只读）
+GET  /qwhdhub/diyLottery/lotterySafely/<id>  → 抽奖一次（无 body，Referer=活动页）
 ```
 
 已知坑（脚本内已处理）：
