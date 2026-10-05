@@ -1,7 +1,7 @@
 # 中国移动 App 自动签到（签到领流量/话费）
 
-基于抓包逆向的中国移动 App「网签领流量」H5 活动自动签到脚本。
-单文件 Python，仅依赖 `requests`。
+基于抓包逆向的中国移动 App「网签领流量」H5 活动自动化脚本合集。
+主签到 / 秒杀 / 评价仅依赖 `requests`；话费余额查询（`cmcc_fee.py`）另需 `cryptography`（AES 解密）。
 
 ## 文件说明
 
@@ -19,7 +19,7 @@
 ## 快速开始
 
 ```bash
-pip3 install requests
+pip3 install -r requirements.txt     # 或最小安装：pip3 install requests cryptography
 cp config.example.json config.json   # 填入自己的 app_token 和手机号
 python3 cmcc_sign.py                 # 签到
 python3 cmcc_sign.py --dry-run       # 只查状态
@@ -129,7 +129,7 @@ python3 cmcc_seckill.py --at 11:59:50 --interval 0.2   # 调参
 抢购节奏默认提前 0.4 秒出手（`--lead`，抵消网络延迟）、每 0.35 秒一发
 （`--interval`，最多 `--max-attempts` 120 发）；redeem 返回 `PRIZE_NO_STOCK`
 （抢完）或 `PRIZE_LIMIT_*`（限次）即停，不打空枪。退出码 `0`=抢到、
-`1`=未中/异常，便于外层脚本判断。crontab 示例（工作日 11:55 启动，活动期才需要挂着）：
+`1`=未中/异常，便于外层脚本判断。crontab 示例（活动日 11:55 启动，仅活动期需要挂着，非活动日运行会因无场次而推送异常通知）：
 
 ```bash
 55 11 * * * cd /path/to/cmcc-auto-checkin && /usr/bin/python3 cmcc_seckill.py >> seckill.log 2>&1
@@ -177,7 +177,8 @@ python3 cmcc_rate.py --exchange 2020419116  # 兑 1GB流量日包（10 币）
 查询实时话费并推送：话费余额（`realBalanceFee`）与实时话费（`realFee`）。
 接口走充值页 H5 通道（`touch.10086.cn/i/v1/fee/real`），加密体系为
 AES-128-CBC（key=iv，密钥嵌在页面 JS 中，脚本已内置），手机号加密后
-作为路径参数传入，无需额外凭证。
+作为路径参数传入，无需额外凭证。**注意：本脚本是唯一需要额外依赖的**——
+AES 解密依赖 `cryptography`（`pip3 install cryptography`，requirements.txt 已包含）。
 
 会话为**半自动**（关键限制）：服务端要求已绑定账号的 `jsessionid-cmcc`
 会话，该会话由 App 原生侧签发，纯 HTTP 无法自助建立（`qwhdsso` 的

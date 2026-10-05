@@ -1,5 +1,7 @@
 # 抓包记录（含手机号/票据等敏感信息，永久不入库）
 *.txt
+# 依赖清单需要入库
+!requirements.txt
 
 # Mimosa 扫描工具本地状态
 .mimosa/

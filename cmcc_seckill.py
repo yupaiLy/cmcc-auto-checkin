@@ -84,8 +84,14 @@ def server_now_ms(s, referer: str) -> int:
     except Exception as e:
         log.warning("sysTime 请求失败: %s", e)
     from email.utils import parsedate_to_datetime
-    r = s.post(SYSTIME_URL, json={}, headers=api_headers(referer), timeout=10)
-    return int(parsedate_to_datetime(r.headers["Date"]).timestamp() * 1000)
+    try:
+        r = s.post(SYSTIME_URL, json={}, headers=api_headers(referer), timeout=10)
+        date = r.headers.get("Date")
+        if date:
+            return int(parsedate_to_datetime(date).timestamp() * 1000)
+    except Exception as e:
+        log.warning("Date 响应头兜底失败: %s", e)
+    raise RuntimeError("无法获取服务器时间（sysTime 与 Date 响应头均不可用）")
 
 
 def pick_zone(zones: list, now_ms: int) -> tuple[dict | None, bool]:

@@ -1,0 +1,3 @@
+requests
+# cmcc_fee.py 话费余额查询的 AES-128-CBC 解密依赖；其余脚本仅需 requests
+cryptography

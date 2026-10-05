@@ -137,9 +137,13 @@ def run(cfg: Config, dry_run: bool, exchange_id: str | None) -> int:
     if exchange_id:
         meta = None
         if exchange_id == "auto":
-            meta = next((p for p in prize_meta.values()
-                         if "话费" in str(p.get("name", ""))
-                         and str(p.get("id")) in status_keys), None)
+            # 优先全名匹配「2元话费券」，避免未来新增其他话费类档位时误选
+            candidates = [p for p in prize_meta.values()
+                          if str(p.get("id")) in status_keys]
+            meta = next((p for p in candidates
+                         if "2元话费券" in str(p.get("name", ""))), None) \
+                or next((p for p in candidates
+                         if "话费" in str(p.get("name", ""))), None)
             if meta is None:
                 lines.append("兑换: 档位列表中未找到话费券，跳过（可 --exchange <prizeId> 指定）")
                 failed = True

@@ -24,6 +24,8 @@
 
 配置：config.json 增加 "fee_session_cookie": "<jsessionid-cmcc 的值>"
       （或环境变量 CMCC_FEE_SESSION）
+      可选 "fee_prov_code"（或环境变量 CMCC_FEE_PROV）：省编码，
+      默认 731（湖南），其他省份用户建议显式填写
 
 退出码：0 = 查询成功；1 = 失败（便于 cron 判断）
 """
@@ -76,7 +78,7 @@ def t16() -> str:
             f"{n.hour:02d}{n.minute:02d}{n.second:02d}{n.microsecond // 1000:03d}")
 
 
-def query_fee(phone: str, session_cookie: str) -> dict:
+def query_fee(phone: str, session_cookie: str, provcode: str = "731") -> dict:
     """查询实时话费，返回解密后的 JSON。"""
     s = requests.Session()
     s.trust_env = False  # 直连，绕过本机代理的 MITM 证书
@@ -87,7 +89,7 @@ def query_fee(phone: str, session_cookie: str) -> dict:
     headers = {
         "user-agent": UA,
         "payphoneno": token + phone[5:7],  # 页面构造规则：token + 手机号第 6-7 位
-        "provcode": "731",
+        "provcode": provcode,
         "referer": f"{FEE_BASE}/i/reapp/v2.0/pages/recharge/recharge.html",
         "accept": "*/*",
     }
@@ -112,8 +114,9 @@ def run(config_path: str) -> int:
         log.error("配置缺少 fee_session_cookie（手机打开充值页后从代理抓包的 "
                   "jsessionid-cmcc 值，或环境变量 CMCC_FEE_SESSION）")
         return 1
+    provcode = str(raw.get("fee_prov_code") or os.environ.get("CMCC_FEE_PROV", "731"))
 
-    fee = query_fee(cfg.phone, cookie)
+    fee = query_fee(cfg.phone, cookie, provcode)
     lines = [
         f"话费余额: {fee.get('realBalanceFee', '?')} 元",
         f"实时话费: {fee.get('realFee', '?')} 元",
