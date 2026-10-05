@@ -114,7 +114,10 @@ def run(config_path: str) -> int:
         log.error("配置缺少 fee_session_cookie（手机打开充值页后从代理抓包的 "
                   "jsessionid-cmcc 值，或环境变量 CMCC_FEE_SESSION）")
         return 1
-    provcode = str(raw.get("fee_prov_code") or os.environ.get("CMCC_FEE_PROV", "731"))
+    provcode = str(os.environ.get("CMCC_FEE_PROV")
+                   or raw.get("fee_prov_code")
+                   or cfg.province_code
+                   or "731")
 
     fee = query_fee(cfg.phone, cookie, provcode)
     lines = [

@@ -141,7 +141,7 @@ def run(cfg: Config, dry_run: bool, exchange_id: str | None) -> int:
             candidates = [p for p in prize_meta.values()
                           if str(p.get("id")) in status_keys]
             meta = next((p for p in candidates
-                         if "2元话费券" in str(p.get("name", ""))), None) \
+                         if str(p.get("name", "")).strip() == "2元话费券"), None) \
                 or next((p for p in candidates
                          if "话费" in str(p.get("name", ""))), None)
             if meta is None:
