@@ -149,7 +149,19 @@ def open_handshake_wed(cfg: Config, jump: str, jt_token: str) -> bool:
     经 SSO 落对应令牌：签到页→QWHD、充值日页→HLWHD），否则兑换返回
     FAILED 且 msg 为会话令牌。"""
     sep = "&" if "?" in jump else "?"
-    s2, ref2 = exchange_session(cfg, act_url=f"{jump}{sep}jtToken={jt_token}")
+    s2, ref2 = None, None
+    last_err = None
+    for wait in (0, 3):  # 换票偶发限频，退避重试一次
+        if wait:
+            time.sleep(wait)
+        try:
+            s2, ref2 = exchange_session(cfg, act_url=f"{jump}{sep}jtToken={jt_token}")
+            break
+        except RuntimeError as e:
+            last_err = e
+    if s2 is None:
+        log.warning("[任务] 目标页会话换票失败: %s", last_err)
+        return False
     info = s2.post("https://wx.10086.cn/hlwyxhdhub/api/open/_pub/task/getOneTaskInfo",
                    json={"jtToken": jt_token}, headers=api_headers(ref2), timeout=30)
     d = info.json().get("data") or {}
@@ -169,10 +181,11 @@ def finish_tasks(cfg: Config, s: requests.Session, referer: str,
     """对可代做的未完成任务逐一完成，每次 +1 抽奖次数。
 
     黑名单制：除邀请/充值/每日登录外全部自动尝试，服务端动态新增的
-    任务 ID 无需维护清单。完整链路照搬 App：
-    1. getJtToken 签发一次性凭证，携凭证访问目标页；
-    2. getOneTaskInfo 取 cToken → 停留 scanTime → openFinish 登记完成；
-    3. 复查状态；仍未完成再退回 finishTask 上报（160030 退避重试）。
+    任务 ID 无需维护清单。自适应两级：
+    1. finishTask 直接上报（零成本，查询/浏览类任务在此即成功）；
+    2. 失败再走 jt 握手完整链：getJtToken 签发凭证 → 携凭证换目标页会话
+       → getOneTaskInfo 取 cToken → 停留 scanTime → openFinish；
+    3. 握手后复查状态，仍未登记则最后再补一次上报。
     """
     todo = [t for t in tasks
             if t.get("taskId") not in MANUAL_SKIP
@@ -185,67 +198,79 @@ def finish_tasks(cfg: Config, s: requests.Session, referer: str,
         return next((x for x in wed_api(s, referer, "taskList")
                      if x.get("taskId") == tid), {})
 
+    def finish_once(tid, hdr_referer=None):
+        """单次上报（160030 网络异常退避重试），返回响应或抛异常。"""
+        resp, last_err = None, None
+        for wait in (0, 3, 8):
+            if wait:
+                time.sleep(wait)
+            try:
+                h = api_headers(hdr_referer) if hdr_referer else api_headers(referer)
+                resp = wed_api(s, referer, "finishTask", {"taskId": tid})
+                break
+            except RuntimeError as e:
+                last_err = e
+                if "160030" not in str(e):
+                    raise
+        if resp is None:
+            raise last_err
+        return resp
+
     for t in todo:
         tid = t.get("taskId")
         title = t.get("title", tid)
         jump = t.get("jumpUrl") or ""
-        hs_ok = False
+        done = False
 
-        # ① jt 握手：签发凭证 → 访问目标页 → 开放平台完成链
+        # ① 快路径：直接上报
         try:
-            r = s.post(f"{API_WED}/getJtToken", json={"taskId": tid},
-                       headers=api_headers(referer), timeout=30)
-            jt = r.json().get("data")
-            if isinstance(jt, str) and jt:
-                sep = "&" if "?" in jump else "?"
-                if urlsplit(jump).hostname == "wx.10086.cn":
-                    try:
-                        assert_safe_url(f"{jump}{sep}jtToken={jt}",
-                                        allowed_hosts={"wx.10086.cn"})
-                        s.get(f"{jump}{sep}jtToken={jt}", timeout=30)
-                    except Exception as e:
-                        log.warning("[任务] %s 目标页访问失败: %s", title, e)
-                hs_ok = open_handshake_wed(cfg, jump, jt)
-                log.info("[任务] jt 握手%s: %s", "完成" if hs_ok else "未通过", title)
-        except Exception as e:
-            log.warning("[任务] %s jt 握手异常（继续上报）: %s", title, e)
-        if not hs_ok:
-            time.sleep(BROWSE_SECONDS)
-
-        # ② 复查状态：握手可能已登记
-        try:
-            if task_status(tid).get("status") == 2:
-                lines.append(f"[任务] {title} 代做成功（+1 次）")
-                continue
-        except Exception:
-            pass
-
-        # ③ finishTask 兜底
-        if not hs_ok and urlsplit(jump).hostname == "wx.10086.cn":
-            try:
-                assert_safe_url(jump, allowed_hosts={"wx.10086.cn"})
-                s.get(jump, timeout=30)
-            except Exception:
-                pass
-        try:
-            resp, last_err = None, None
-            for wait in (0, 3, 8):  # 160030 网络异常等瞬时错误退避重试
-                if wait:
-                    time.sleep(wait)
-                try:
-                    resp = wed_api(s, referer, "finishTask", {"taskId": tid})
-                    break
-                except RuntimeError as e:
-                    last_err = e
-                    if "160030" not in str(e):
-                        raise
-            if resp is None:
-                raise last_err
+            resp = finish_once(tid)
             add = (resp.get("data") or {}).get("addDrawTimes")
             lines.append(f"[任务] {title} 代做成功" + (f"，+{add} 次" if add else ""))
+            done = True
         except Exception as e:
-            lines.append(f"[任务] {title} 上报失败: {e}")
-        time.sleep(random.uniform(1, 2))
+            log.info("[任务] %s 直接上报未过（%s），改走 jt 握手", title, e)
+
+        # ② jt 握手完整链
+        if not done:
+            hs_ok = False
+            try:
+                r = s.post(f"{API_WED}/getJtToken", json={"taskId": tid},
+                           headers=api_headers(referer), timeout=30)
+                jt = r.json().get("data")
+                if isinstance(jt, str) and jt:
+                    hs_ok = open_handshake_wed(cfg, jump, jt)
+                    log.info("[任务] jt 握手%s: %s", "完成" if hs_ok else "未通过", title)
+            except Exception as e:
+                log.warning("[任务] %s jt 握手异常: %s", title, e)
+            if hs_ok:
+                time.sleep(1)
+                try:
+                    cur = task_status(tid)
+                    if cur.get("status") == 2:
+                        lines.append(f"[任务] {title} 代做成功（+1 次）")
+                        done = True
+                except Exception:
+                    pass
+
+        # ③ 握手可能已登记但状态延迟，最后补一次上报
+        if not done:
+            if urlsplit(jump).hostname == "wx.10086.cn":
+                try:
+                    assert_safe_url(jump, allowed_hosts={"wx.10086.cn"})
+                    s.get(jump, timeout=30)
+                except Exception:
+                    pass
+            try:
+                resp = finish_once(tid)
+                add = (resp.get("data") or {}).get("addDrawTimes")
+                lines.append(f"[任务] {title} 代做成功" + (f"，+{add} 次" if add else ""))
+                done = True
+            except Exception as e:
+                lines.append(f"[任务] {title} 上报失败: {e}")
+
+        if not done:
+            time.sleep(random.uniform(1, 2))
 
 
 def puzzle_complete(pieces: dict) -> bool:
