@@ -62,22 +62,17 @@ TIER_NAMES = {"dp1": "95折话费券", "dp2": "9折话费券", "dp3": "8折话�
 PUZZLE_RECEIVE = {1: "r6", 2: "r5", 3: "r4"}
 RECEIVE_LABELS = {"r6": "95折话费券", "r5": "9折话费券", "r4": "8折话费券"}
 
-# 尝试代做的任务（浏览/查询类，每项 +1 抽奖次数）：
-# llym 走 jt 握手（getJtToken → 携凭证访问目标页，服务端在跳转时登记完成），
-# 其余任务携带 taskId 完成上报即可。
-# 不代做：yqyh（需真实受邀者）、czhf（真实充值，涉及消费）、dlhd（进页自动发放）。
-FINISH_TASKS = {"llym", "ll_yxr", "ll_spr", "ll_yd", "ll_sp", "cc_hf", "cc_zd", "ll_hf"}
-JT_HANDSHAKE_TASKS = {"llym"}
+# 代做采用黑名单制：除以下三类外全部自动尝试（含服务端动态新增的任务），
+# 每项 +1 抽奖次数。失败会如实报告，不影响其他任务。
+MANUAL_SKIP = {
+    "yqyh": "需邀请真实用户登录助力",
+    "czhf": "需真实充值满10元（涉及消费，不做自动化）",
+    "llym": "需在 App 内真实浏览签到页（每日1次/月4次，点一下即可）",
+    "dlhd": "进页自动完成",
+}
 
 # 浏览 5 秒的语义来自 llym 的任务名「参与签到并浏览5秒」
 BROWSE_SECONDS = 5
-
-# 不代做任务 → 推送里的一句话说明
-MANUAL_HINTS = {
-    "yqyh": "需邀请真实用户登录助力",
-    "czhf": "需真实充值满10元（涉及消费，不做自动化）",
-    "dlhd": "进页自动完成",
-}
 
 log = logging.getLogger("cmcc_wed")
 
@@ -139,72 +134,99 @@ def task_lines(tasks: list[dict]) -> list[str]:
             # status=2 语义是"今日不可再做"：已完成（明日再来）或未开放（周日开放）
             note = t.get("buttontxt") or "已完成"
             lines.append(f"✓ {title}（+{add}次{quota}，{note}）")
-        elif tid in FINISH_TASKS:
-            lines.append(f"→ {title}（+{add}次{quota}，脚本代做上报）")
-        elif tid in MANUAL_HINTS:
-            lines.append(f"· {title}（+{add}次{quota}，{MANUAL_HINTS[tid]}）")
+        elif tid in MANUAL_SKIP:
+            lines.append(f"· {title}（+{add}次{quota}，{MANUAL_SKIP[tid]}）")
         else:
-            lines.append(f"? {title}（+{add}次{quota}，未知任务类型）")
+            lines.append(f"→ {title}（+{add}次{quota}，脚本代做）")
     return lines
+
+
+def open_handshake_wed(cfg: Config, jump: str, jt_token: str) -> bool:
+    """开放平台完成链：携 jtToken 为目标页换会话 → getOneTaskInfo 取 cToken
+    → 停留 scanTime → openFinish。
+
+    会话必须是目标页自己的（App 内点「去完成」时 WebView 打开目标页并
+    经 SSO 落对应令牌：签到页→QWHD、充值日页→HLWHD），否则兑换返回
+    FAILED 且 msg 为会话令牌。"""
+    sep = "&" if "?" in jump else "?"
+    s2, ref2 = exchange_session(cfg, act_url=f"{jump}{sep}jtToken={jt_token}")
+    info = s2.post("https://wx.10086.cn/hlwyxhdhub/api/open/_pub/task/getOneTaskInfo",
+                   json={"jtToken": jt_token}, headers=api_headers(ref2), timeout=30)
+    d = info.json().get("data") or {}
+    ct = d.get("cToken")
+    if not ct:
+        log.info("[任务] getOneTaskInfo 未取得 cToken: %s %s",
+                 info.json().get("code"), info.json().get("msg"))
+        return False
+    time.sleep(int(d.get("scanTime") or 5) + 1)
+    fin = s2.post("https://wx.10086.cn/hlwyxhdhub/api/open/_pub/task/openFinish",
+                  json={"cToken": ct}, headers=api_headers(ref2), timeout=30)
+    return fin.json().get("code") == "SUCCESS"
 
 
 def finish_tasks(cfg: Config, s: requests.Session, referer: str,
                  tasks: list[dict], lines: list[str]):
     """对可代做的未完成任务逐一完成，每次 +1 抽奖次数。
 
-    两类完成方式：
-    - jt 握手任务（llym）：先 getJtToken 签发一次性凭证，再携凭证 SSO 访问
-      目标页——服务端在跳转时登记完成（实测 openFinish 校验链可省）；
-    - 其余：finishTask 上报 taskId 即可。上报前对 wx.10086.cn 域内的 jumpUrl
-      GET 一发并停留数秒，贴合 App 内的浏览行为；外部域名直接跳过访问。
+    黑名单制：除邀请/充值/每日登录外全部自动尝试，服务端动态新增的
+    任务 ID 无需维护清单。完整链路照搬 App：
+    1. getJtToken 签发一次性凭证，携凭证访问目标页；
+    2. getOneTaskInfo 取 cToken → 停留 scanTime → openFinish 登记完成；
+    3. 复查状态；仍未完成再退回 finishTask 上报（160030 退避重试）。
     """
     todo = [t for t in tasks
-            if t.get("taskId") in FINISH_TASKS
+            if t.get("taskId") not in MANUAL_SKIP
             and t.get("status") != 2
             and quota_left(t) != 0]   # 月度配额用尽的不空发
     if not todo:
         return
+
+    def task_status(tid):
+        return next((x for x in wed_api(s, referer, "taskList")
+                     if x.get("taskId") == tid), {})
+
     for t in todo:
         tid = t.get("taskId")
         title = t.get("title", tid)
         jump = t.get("jumpUrl") or ""
+        hs_ok = False
 
-        if tid in JT_HANDSHAKE_TASKS and jump:
-            jt_ok = False
-            try:
-                r = s.post(f"{API_WED}/getJtToken", json={"taskId": tid},
-                           headers=api_headers(referer), timeout=30)
-                jt = r.json().get("data")
-                if isinstance(jt, str) and jt:
-                    sep = "&" if "?" in jump else "?"
-                    exchange_session(cfg, act_url=f"{jump}{sep}jtToken={jt}")
-                    jt_ok = True
-                    log.info("[任务] jt 握手完成: %s", title)
-                else:
-                    log.warning("[任务] %s 未取得 jtToken: %s", title, r.json())
-            except Exception as e:
-                log.warning("[任务] %s jt 握手失败（继续上报）: %s", title, e)
+        # ① jt 握手：签发凭证 → 访问目标页 → 开放平台完成链
+        try:
+            r = s.post(f"{API_WED}/getJtToken", json={"taskId": tid},
+                       headers=api_headers(referer), timeout=30)
+            jt = r.json().get("data")
+            if isinstance(jt, str) and jt:
+                sep = "&" if "?" in jump else "?"
+                if urlsplit(jump).hostname == "wx.10086.cn":
+                    try:
+                        assert_safe_url(f"{jump}{sep}jtToken={jt}",
+                                        allowed_hosts={"wx.10086.cn"})
+                        s.get(f"{jump}{sep}jtToken={jt}", timeout=30)
+                    except Exception as e:
+                        log.warning("[任务] %s 目标页访问失败: %s", title, e)
+                hs_ok = open_handshake_wed(cfg, jump, jt)
+                log.info("[任务] jt 握手%s: %s", "完成" if hs_ok else "未通过", title)
+        except Exception as e:
+            log.warning("[任务] %s jt 握手异常（继续上报）: %s", title, e)
+        if not hs_ok:
             time.sleep(BROWSE_SECONDS)
-            # 握手即登记，复查状态出结论
-            try:
-                cur = next((x for x in wed_api(s, referer, "taskList")
-                            if x.get("taskId") == tid), {})
-                if cur.get("status") == 2:
-                    lines.append(f"[任务] {title} 代做成功（+{cur.get('addDrawTimes') or 1} 次）")
-                else:
-                    lines.append(f"[任务] {title} 握手未生效，需 App 内手动")
-            except Exception as e:
-                lines.append(f"[任务] {title} 状态确认失败: {e}")
-            continue
 
-        if urlsplit(jump).hostname == "wx.10086.cn":
+        # ② 复查状态：握手可能已登记
+        try:
+            if task_status(tid).get("status") == 2:
+                lines.append(f"[任务] {title} 代做成功（+1 次）")
+                continue
+        except Exception:
+            pass
+
+        # ③ finishTask 兜底
+        if not hs_ok and urlsplit(jump).hostname == "wx.10086.cn":
             try:
                 assert_safe_url(jump, allowed_hosts={"wx.10086.cn"})
                 s.get(jump, timeout=30)
-                log.info("[任务] 已访问 %s", title)
-            except Exception as e:
-                log.warning("[任务] %s 页面访问失败（继续上报）: %s", title, e)
-            time.sleep(BROWSE_SECONDS)
+            except Exception:
+                pass
         try:
             resp, last_err = None, None
             for wait in (0, 3, 8):  # 160030 网络异常等瞬时错误退避重试
