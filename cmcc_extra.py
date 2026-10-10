@@ -86,7 +86,8 @@ ACTS = {
 }
 
 # 跳转任务握手页（hlwyxhdhub 域，会话令牌名为 HLWHD_SESSION_TOKEN）
-OPEN_TASK_ENTRY = f"{BASE}/hlwyxhdhub/act-wedrecharge/index.html?pageId=1849008675699650560"
+OPEN_TASK_ENTRY = (f"{BASE}/hlwyxhdhub/act-wedrecharge/1024101716"
+                   "?pageId=1849008675699650560&channelId=P00000093619")
 
 
 class ActConfig:
@@ -191,41 +192,102 @@ def run_lottery(s: requests.Session, referer: str, cfg: dict, dry_run: bool) -> 
     return f"{head}，已抽 {len(results)} 次: {' / '.join(results)}"
 
 
-def open_finish_task(cfg: ActConfig, task: dict) -> bool:
-    """跳转类任务握手：jumpUrl 自带 taskToken → 换 hlwyxhdhub 会话 →
-    getOneTaskInfo 取 cToken → 停留 scanTime → openFinish。
-    成功后由调用方回主站 getTaskAward 领奖。"""
-    ju = str(task.get("jumpUrl") or "")
-    m = re.search(r"taskToken=([^&]+)", ju)
-    if not m:
-        return False
+def open_task_session(cfg: ActConfig, cache: dict):
+    """开放平台握手用的 hlwyxhdhub 会话，跨任务复用（cache 为 {"s":..,"ref":..}）。
+
+    SSO 换票偶发失败（当日多次换票后限频），重试一次。
+    """
+    if cache.get("s"):
+        return cache["s"], cache["ref"]
+    last_err = None
+    for wait in (0, 3):
+        if wait:
+            time.sleep(wait)
+        try:
+            s2, ref2 = exchange_session(ActConfig(cfg, OPEN_TASK_ENTRY))
+            cache.update(s=s2, ref=ref2)
+            return s2, ref2
+        except RuntimeError as e:
+            last_err = e
+    raise last_err
+
+
+def open_handshake(cfg: ActConfig, cache: dict, jt_token: str, scan: int = 0) -> bool:
+    """开放平台任务握手：getOneTaskInfo 取 cToken → 停留 scanTime → openFinish。"""
     try:
-        s2, ref2 = exchange_session(ActConfig(cfg, OPEN_TASK_ENTRY))
+        s2, ref2 = open_task_session(cfg, cache)
         info = api_call(s2, ref2, "POST",
                         "/hlwyxhdhub/api/open/_pub/task/getOneTaskInfo",
-                        {"jtToken": m.group(1)})
-        ct = (info.get("data") or {}).get("cToken")
-        scan = int((info.get("data") or {}).get("scanTime") or 0)
+                        {"jtToken": jt_token})
+        d = info.get("data") or {}
+        ct = d.get("cToken")
         if not ct:
             return False
-        time.sleep(scan + 1)
+        time.sleep(int(d.get("scanTime") or scan or 0) + 1)
         fin = api_call(s2, ref2, "POST",
                        "/hlwyxhdhub/api/open/_pub/task/openFinish", {"cToken": ct})
         return fin.get("code") == "SUCCESS"
     except Exception as e:
-        log.debug("跳转任务握手失败: %s", e)
+        log.debug("开放平台握手失败: %s", e)
         return False
 
 
+def open_finish_task(cfg: ActConfig, task: dict, cache: dict | None = None) -> bool:
+    """跳转类任务握手：jumpUrl 自带 taskToken → 握手完成。
+    成功后由调用方回主站 getTaskAward 领奖。
+
+    cache 传入 {"s":..,"ref":..} 字典时跨任务复用同一 hlwyxhdhub 会话，
+    避免每个任务各做一次完整 SSO 换票。
+    """
+    ju = str(task.get("jumpUrl") or "")
+    m = re.search(r"taskToken=([^&]+)", ju)
+    if not m:
+        return False
+    return open_handshake(cfg, cache or {}, m.group(1))
+
+
 def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str:
-    """签到页 AI豆任务（mark/task 体系）。"""
+    """签到页 AI豆任务（mark/task 体系）。
+
+    按任务类别自适应：
+    - taskInfo 下发 taskToken 的任务（视频/浏览类）：开放平台握手即完成
+      （getOneTaskInfo → 停留 scanTime → openFinish），无需 finishTask；
+    - 其余任务：finishTask 阶梯——直接上报 → 失败则访问目标页并停留后换
+      目标页 Referer 重试 → 仍失败且提示特殊处理再走握手。
+    握手会话跨任务复用，避免逐任务完整换票；taskType/scanTime 取自 taskInfo
+    （taskList 的 taskType 是另一套枚举，不可混用）。
+    """
+    begun = time.monotonic()
     tl = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/taskList", {})
     tasks = (tl.get("data") or {}).get("tasks") or []
-    todo = [t for t in tasks if t.get("status") == 0]
+    # 外部合作区任务由合作方服务端回调记账，客户端无法代做，整区跳过
+    ext = [t for t in tasks if t.get("status") == 0
+           and t.get("taskClasifiName") == "外部合作区"]
+    todo = [t for t in tasks if t.get("status") == 0
+            and t.get("taskClasifiName") != "外部合作区"]
     if dry_run or not todo:
-        return f"AI豆任务 {len(tasks)} 个，待办 {len(todo)} 个"
+        return (f"AI豆任务 {len(tasks)} 个，待办 {len(todo)} 个"
+                f"（另有外部合作区 {len(ext)} 个不做）")
 
+    open_cache: dict = {}
     got = skipped = 0
+
+    # 上次运行握手中断/未领取的遗留（status=1 已完成待领奖）先补领
+    for t in [x for x in tasks if x.get("status") == 1]:
+        tid = str(t.get("taskId") or "")
+        aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward",
+                      {"taskId": tid})
+        if aw.get("code") == "SUCCESS":
+            n = (aw.get("data") or {}).get("awardNum")
+            log.info("[AI豆] 补领 %s +%s", t.get("taskName", tid), n)
+            got += 1
+        time.sleep(random.uniform(0.2, 0.5))
+
+    def finish(tid, ttype, hdr_referer=None):
+        h = api_headers(hdr_referer) if hdr_referer else api_headers(referer)
+        return s.post(BASE + "/qwhdhub/api/mark/task/finishTask",
+                      json={"taskId": tid, "taskType": ttype}, headers=h, timeout=30).json()
+
     for t in todo:
         tid = str(t.get("taskId") or "")
         if not tid:
@@ -235,40 +297,38 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
         d = info.get("data") or {}
         task_type = str(d.get("taskType") or "")
         scan = int(d.get("scanTime") or 0)
+        task_token = d.get("taskToken") or ""
 
-        # 到访：仅 http(s) 目标页可 GET（小程序/deeplink 无页可访，直接试 finish）
-        if ju.startswith("https://"):
-            try:
-                assert_safe_url(ju)
-                s.get(ju, timeout=20)
-                if scan:
-                    time.sleep(scan + 1)
-            except ValueError:
-                log.debug("跳过非公网 jumpUrl: %s", ju)
-            except requests.RequestException:
-                pass
-
-        r = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/finishTask",
-                     {"taskId": tid, "taskType": task_type})
-        msg = r.get("msg") or ""
-        # 服务端校验 Referer=目标页：默认 referer 被拒时带目标页 referer 重试一次
-        if r.get("code") != "SUCCESS" and "未达到" in msg and ju.startswith("https://"):
-            try:
-                assert_safe_url(ju)
-                rr = s.post(BASE + "/qwhdhub/api/mark/task/finishTask",
-                            json={"taskId": tid, "taskType": task_type},
-                            headers=api_headers(ju), timeout=30)
-                r = rr.json()
-            except (ValueError, requests.RequestException):
-                pass
+        done = False
+        if task_token:
+            # 开放平台任务：握手即完成
+            done = open_handshake(cfg, open_cache, task_token, scan)
+        if not done:
+            r = finish(tid, task_type)
             msg = r.get("msg") or ""
+            if r.get("code") != "SUCCESS" and "公众号" in msg:
+                # 需真实关注公众号，无法代做，立即放弃不重试
+                skipped += 1
+                time.sleep(random.uniform(0.2, 0.5))
+                continue
+            # 访问目标页后带目标页 Referer 重试（停留 scanTime，封顶 15s）
+            if r.get("code") != "SUCCESS" and ju.startswith("https://"):
+                try:
+                    assert_safe_url(ju)
+                    s.get(ju, timeout=15)
+                    if scan:
+                        time.sleep(min(scan, 15) + 1)
+                    r = finish(tid, task_type, ju)
+                except (ValueError, requests.RequestException):
+                    pass
+                msg = r.get("msg") or ""
+            # 提示特殊处理：jumpUrl 自带 taskToken 的走握手
+            if r.get("code") != "SUCCESS" and ("特殊处理" in msg or "openFinish" in msg):
+                done = open_finish_task(cfg, t, open_cache)
+                if done:
+                    r = {"code": "SUCCESS"}
 
-        if r.get("code") != "SUCCESS" and ("特殊处理" in msg or "openFinish" in msg):
-            if open_finish_task(cfg, t):
-                r = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/finishTask",
-                             {"taskId": tid, "taskType": task_type})
-
-        if r.get("code") == "SUCCESS":
+        if done or r.get("code") == "SUCCESS":
             aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward",
                           {"taskId": tid})
             n = (aw.get("data") or {}).get("awardNum") if aw.get("code") == "SUCCESS" else "?"
@@ -276,8 +336,10 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
             got += 1
         else:
             skipped += 1
-        time.sleep(random.uniform(0.8, 1.8))
-    return f"AI豆任务 {len(todo)} 个待办，完成 {got} 个，跳过 {skipped} 个（第三方 App/真实操作类）"
+        time.sleep(random.uniform(0.2, 0.6))
+    cost = time.monotonic() - begun
+    return (f"AI豆任务 {len(todo)} 个待办，完成 {got} 个，跳过 {skipped} 个"
+            f"（第三方 App/真实操作类），外部合作区 {len(ext)} 个未计入，耗时 {cost:.0f}s")
 
 
 def run_games(cfg, dry_run: bool) -> list[str]:
