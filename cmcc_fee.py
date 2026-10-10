@@ -6,7 +6,7 @@
 
 查询话费并推送：realBalanceFee=话费余额、realFee=实时话费。
 
-加密体系（2026-10-02 从充值页 JS 逆向，密钥嵌在前端 inner.js）：
+加密体系（2026-10-02 从充值页 JS 分析获得，密钥嵌在前端 inner.js）：
   AES-128-CBC，key = iv = "043AOQGK6ykklyZA"（qenP/penP/ivP 字节码数组拼合）
   - 手机号 → AES 加密 → base64 → base64 + 手机号第 6-7 位 → URL 路径 + payphoneno 头
   - 响应 data.outParam → base64 → base64 → AES 解密 → JSON
@@ -81,7 +81,7 @@ def t16() -> str:
 def query_fee(phone: str, session_cookie: str, provcode: str = "731") -> dict:
     """查询实时话费，返回解密后的 JSON。"""
     s = requests.Session()
-    s.trust_env = False  # 直连，绕过本机代理的 MITM 证书
+    s.trust_env = False  # 直连，不继承本机代理设置
     s.mount("https://", LegacyTLSAdapter())
     s.cookies.set("jsessionid-cmcc", session_cookie, domain="10086.cn")
 

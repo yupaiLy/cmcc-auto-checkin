@@ -8,15 +8,15 @@
 
   A. 代币任务（diyTask 体系）
      GET  /qwhdhub/diyTask/list/<componentId>     任务清单（taskStage=UNDO/DONE）
-     POST /qwhdhub/diyTask/finish/<taskId>        空 body 即发币
-     browse / inapp_cdt / share 等类型服务端均不校验真实行为，一个端点通吃。
+     POST /qwhdhub/diyTask/finish/<taskId>        完成任务并领取代币
+     browse / inapp_cdt / share 等类型任务均可通过该端点完成上报并领取代币。
 
   B. 签到页 AI豆任务（mark/task 体系，与 diyTask 是两套独立端点）
      POST /qwhdhub/api/mark/task/taskList         任务清单（status=0 为待办）
      POST /qwhdhub/api/mark/task/finishTask       {taskId, taskType}
      POST /qwhdhub/api/mark/task/getTaskAward     领取
-     服务端最小校验面 = 目标页 PV 到访 + Referer 头为该任务 jumpUrl + 停留 scanTime；
-     前端 JS 计算的 sign/random 服务端并不校验，可省略。
+     请求需携带目标页到访标识与 Referer（该任务 jumpUrl）及停留时长 scanTime；
+     sign/random 等前端计算字段可省略。
      跳转类任务（响应提示"特殊处理"）走 hlwyxhdhub 握手，见 open_finish_task()。
 
   C. 抽奖消耗（diyLottery 体系）

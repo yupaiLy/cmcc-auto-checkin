@@ -4,7 +4,7 @@
 中国移动「签到有礼」假期秒杀抢券脚本
 ====================================
 
-复用 cmcc_sign.py 的会话链路与配置（同一个活动 1021122301），按抓包逆向的接口：
+复用 cmcc_sign.py 的会话链路与配置（同一个活动 1021122301），按抓包分析的接口：
 
   1. exchange_session()                 SSO 换 QWHD_SESSION_TOKEN（jwt 免票据续期）
   2. POST /qwhdhub/api/mark/markSeckill/sysTime          服务器时间，算本机时钟偏移

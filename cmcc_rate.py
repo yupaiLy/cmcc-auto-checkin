@@ -9,7 +9,7 @@
 得 10 评价币；评价币可兑换流量/话费券，每月限兑 4 次，活动结束即清零。
 凭证与会话完全复用 cmcc_sign.exchange_session()（jwt 自续期缓存同样生效）。
 
-接口链路（2026-10-02 Proxyman 抓包 + 页面 JS 逆向）：
+接口链路（2026-10-02 Proxyman 抓包 + 页面 JS 分析）：
 
   GET  /qwhdhub/assess/markStatus                       本周评价机会与上次评分
   GET  /qwhdhub/assess/assess?score=10&time=<ms>        提交评分（满分 +10 评价币）

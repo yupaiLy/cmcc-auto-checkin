@@ -4,7 +4,7 @@
 中国移动 App「签到领流量/话费」自动签到脚本
 ================================================
 
-依据抓包逆向的接口链路（wx.10086.cn / qwhdhub mark31 活动）：
+依据抓包分析的接口链路（wx.10086.cn / qwhdhub mark31 活动）：
 
   1. GET  /qwhdsso/login?actUrl=<活动页>        取得内嵌一次性 sid 的登录中转页
   2. POST /qwhdsso/appTokenLogin?sid=...        用 App 票据换取活动页跳转 URL
@@ -201,25 +201,29 @@ def save_jwt_cache(cfg: Config, jwt: str | None):
         pass
 
 
-def exchange_session(cfg: Config) -> tuple[requests.Session, str]:
+def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.Session, str]:
     """走 SSO 换取活动会话（QWHD_SESSION_TOKEN 落在 session cookie 里）。
+
+    act_url 缺省用主签到活动页；其他活动（如 hlwyxhdhub 的周三充值日）传入
+    各自的页面地址即可——同一 jwt 跨 hub 通用，只是不同 hub 落不同令牌名。
 
     返回 (session, referer)。referer 是带 token 的活动页地址，后续 API 都要带。
 
     凭证策略（实测结论）：
     - jwt 是账号级长期凭证：appTokenLogin 请求里 jwtToken 优先于 token 字段，
-      服务端校验通过 jwt 即签发会话（token 可为空/伪造），且不受 App 内切换登录影响；
+      服务端校验通过 jwt 即签发会话（使用 jwt 时 token 字段可留空），
+      且不受 App 内切换登录影响；
     - 因此优先用缓存 jwt 免票据续期，app_token 仅在 jwt 缺失/失效时作引导兜底；
     - 每次登录响应都会重签 jwt，总是回写缓存保持最新。
     """
     s = requests.Session()
-    # 直连：绕过系统/环境变量代理，避免本机抓包工具的 MITM 证书干扰 SSL 验证
+    # 直连：不继承系统/环境变量代理，避免本机抓包工具的 MITM 证书干扰 SSL 验证
     s.trust_env = False
     s.mount("https://", LegacyTLSAdapter())
     s.headers.update({"user-agent": USER_AGENT, "accept-language": "zh-CN,zh-Hans;q=0.9"})
 
     # ① 登录中转页，提取一次性 sid
-    r = s.get(SSO_LOGIN, params={"dlwmh": "true", "actUrl": cfg.act_url}, timeout=30)
+    r = s.get(SSO_LOGIN, params={"dlwmh": "true", "actUrl": act_url or cfg.act_url}, timeout=30)
     r.raise_for_status()
     m_app = re.search(r"loginPath\s*=\s*'([^']+)'", r.text)
     if not m_app:
@@ -392,7 +396,8 @@ def notify(cfg: Config, title: str, detail: str):
 
 # ---------------------------------------------------------------- 主流程
 
-def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False, games: bool = False) -> int:
+def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False,
+        games: bool = False, wed: bool = False) -> int:
     today = datetime.now().strftime("%Y%m%d")
 
     # 重建会话的兜底：第一次失败若是会话问题，重建后再试一次
@@ -489,6 +494,20 @@ def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False, gam
                 except Exception as e:
                     lines.append(f"[拓展活动] 失败: {e}")
 
+    # 周三充值日拼图抽奖（可选模块 cmcc_wed.py，缺失时静默跳过）
+    if wed:
+        try:
+            import cmcc_wed
+        except ImportError:
+            lines.append("[拼图] 未找到 cmcc_wed.py，已跳过")
+        else:
+            try:
+                for line in cmcc_wed.run(cfg, dry_run):
+                    log.info("[周三拼图] %s", line)
+                    lines.append(f"[拼图] {line}")
+            except Exception as e:
+                lines.append(f"[拼图] 失败: {e}")
+
     summary = "\n".join(lines)
     log.info("\n%s", summary)
     notify(cfg, "移动签到通知", f"{summary}\n手机尾号 {cfg.phone[-4:]}")
@@ -506,6 +525,8 @@ def main() -> int:
                         help="顺带完成签到页 AI豆任务（需 cmcc_extra.py）")
     parser.add_argument("--games", action="store_true",
                         help="跑拓展活动：周六游戏中心/追剧/抽话费页的打卡+任务+抽奖（需 cmcc_extra.py）")
+    parser.add_argument("--wed", action="store_true",
+                        help="顺带跑周三充值日拼图抽奖（需 cmcc_wed.py）")
     parser.add_argument("--delay", type=int, default=0, metavar="N", help="启动前随机延迟 0~N 秒")
     args = parser.parse_args()
 
@@ -527,7 +548,7 @@ def main() -> int:
 
     try:
         return run(cfg, dry_run=args.dry_run, claim=args.claim,
-                   tasks=args.tasks, games=args.games)
+                   tasks=args.tasks, games=args.games, wed=args.wed)
     except Exception as e:
         log.exception("执行失败: %s", e)
         notify(cfg, "移动签到异常", f"{e}\n手机尾号 {cfg.phone[-4:] if cfg.phone else '????'}")

@@ -1,6 +1,6 @@
 # 中国移动 App 自动签到（签到领流量/话费）
 
-基于抓包逆向的中国移动 App「网签领流量」H5 活动自动化脚本合集。
+基于抓包分析的中国移动 App「网签领流量」H5 活动自动化脚本合集。
 主签到 / 秒杀 / 评价仅依赖 `requests`；话费余额查询（`cmcc_fee.py`）另需 `cryptography`（AES 解密）。
 
 ## 文件说明
@@ -11,6 +11,7 @@
 | `cmcc_extra.py` | 可选拓展模块：代币任务 / AI豆任务 / 抽奖消耗（`--tasks` / `--games`） |
 | `cmcc_seckill.py` | 假期秒杀抢券脚本(20-5门槛券) |
 | `cmcc_rate.py` | 评价有礼：每周自动满分评价 + 评价币兑换（`--exchange`） |
+| `cmcc_wed.py` | 周三充值日：进页领次数 + 代做可脚本任务 + 自动抽拼图 + 场次秒杀（`--wed` 也可挂主脚本） |
 | `cmcc_fee.py` | 话费余额查询（充值页 H5 通道，需 `fee_session_cookie`） |
 | `config.example.json` | 配置模板，复制为 `config.json` 后填写 |
 | `.cmcc_jwt_cache_<尾号>.json` | 运行后按账号自动生成的 jwt 凭证缓存（勿外传） |
@@ -30,6 +31,7 @@ python3 cmcc_sign.py --games         # 三拓展活动：打卡 + 代币任务 +
 python3 cmcc_sign.py --games --dry-run   # 只报各活动状态与余额，零消耗
 python3 cmcc_seckill.py --dry-run        # 秒杀：查场次/校时/资格（活动期）
 python3 cmcc_rate.py --dry-run           # 评价有礼：查机会/余额/档位
+python3 cmcc_wed.py --dry-run            # 周三充值日：查次数/拼图进度/任务（只读）
 python3 cmcc_fee.py --config config2.json  # 话费余额查询（需 fee_session_cookie）
 ```
 
@@ -172,6 +174,50 @@ python3 cmcc_rate.py --exchange 2020419116  # 兑 1GB流量日包（10 币）
 `prizeStatus.remain` 是「月剩余兑换次数」。评价成功
 评价币实时到账，所兑卡券 48 小时内发放至 App「我的奖品」，券有效期 10 天。
 
+## 周三充值日拼图抽奖（可选，`cmcc_wed.py`）
+
+「周三充值日」活动（hlwyxhdhub，活动页 `act-wedrecharge/1024101716`）：做任务攒
+抽奖次数，抽拼图碎片集齐解锁话费券——95折（4片）→ 9折（6片）→ 8折（9片）依次解锁
+不可跳级，碎片随机、重复抽到会累计为副本。会话与凭证完全复用主脚本（jwt 跨 hub
+通用，本活动签发 `HLWHD_SESSION_TOKEN`），无新增配置字段。
+
+每日自动化内容：
+
+- **进页**：SSO 换会话时即访问活动页，「每日登录」任务自动 +1 次；
+- **任务**：自动完成签到页浏览、游戏日/视频日浏览、一豆有好礼、看精彩视频、
+  查话费余额、查账单、瓜分话费共 8 项日常任务，每项 +1 次；邀请助力、
+  真实充值两类涉及真人操作或消费，不代做，只报告状态；
+- **抽奖**：自动抽光当日全部次数；当前档位集齐后自动进入下一档
+  （95折 4片 → 9折 6片 → 8折 9片）。`--dry-run` 全程只读。
+- **领取**：档位集齐后自动领取对应话费券（奖励月底清零，故默认代领），
+  已领取过的不会重复领取。
+
+```bash
+python3 cmcc_wed.py --dry-run        # 查次数/拼图进度/任务状态（零消耗）
+python3 cmcc_wed.py                  # 进页 + 代做任务 + 抽光当日次数
+python3 cmcc_sign.py --wed           # 或挂在主签到后一起跑
+```
+
+### 周三充值日秒杀（`--seckill`）
+
+活动内置场次秒杀（充值立减券/折扣券等，每周三 8 点场，服务端 `seckillTime`
+可配多场）。抢购端点为 `drawPrize`（实测未开场返回「活动还未开始」的时间条件
+错误，开场后同一请求即开奖）。脚本自动校准服务器时钟（本机偏差实测 ±0.1s），
+到点前 0.4s 开始连发（间隔 0.35s、预算 120 发可调），抢中即停并推送券名，
+无库存等终态自动止盈，每发响应均写日志。
+
+```bash
+python3 cmcc_wed.py --seckill --dry-run     # 查时钟偏差/场次状态，不发请求
+python3 cmcc_wed.py --seckill               # 等到 08:00:00（服务器时间）自动开抢
+python3 cmcc_wed.py --seckill --at 12:00:00 # 指定其他场次
+```
+
+crontab 示例（周三 07:55 启动，仅活动期需要挂着）：
+
+```bash
+55 7 * * 3 cd /path/to/cmcc-auto-checkin && /usr/bin/python3 cmcc_wed.py --seckill >> wed_seckill.log 2>&1
+```
+
 ## 话费余额查询（可选，`cmcc_fee.py`）
 
 查询实时话费并推送：话费余额（`realBalanceFee`）与实时话费（`realFee`）。
@@ -206,7 +252,7 @@ python3 cmcc_fee.py --config config2.json    # 查询并推送话费余额
 | 体系 | 内容 | 开关 |
 |------|------|------|
 | mark/task | 签到页 AI豆任务（到访 + finish + 领奖，57 项中约 1/3 可纯 HTTP 完成） | `--tasks` |
-| diyTask | 三活动页代币任务（browse/share 等类型服务端不校验真实行为） | `--games` |
+| diyTask | 三活动页代币任务（浏览/分享类任务可自动完成并领取） | `--games` |
 | diyLottery | 抽奖消耗：周六游戏中心（游戏币 10/次，周六 12:00 起奖池拓展）、追剧领福利（次数 1/抽，仅周日开放） | `--games` |
 
 抽奖内置**窗口闸门**：非窗口日只报余额不消耗（游戏币攒到周六拓展池一次抽光，
@@ -232,9 +278,9 @@ POST /qwhdhub/api/mark/mark31/taskAward/<id> → 领累计/连签奖励（默认
 
 ```
 POST /qwhdhub/api/mark/task/taskList         → AI豆任务清单（--tasks）
-POST /qwhdhub/api/mark/task/finishTask       → 完成（服务端最小校验=到访+Referer，前端 sign 不校验）
+POST /qwhdhub/api/mark/task/finishTask       → 完成到访类任务并领取奖励
 GET  /qwhdhub/diyTask/list/<componentId>     → 代币任务清单
-POST /qwhdhub/diyTask/finish/<taskId>        → 空 body 即发币
+POST /qwhdhub/diyTask/finish/<taskId>        → 完成任务并领取代币
 POST /qwhdhub/diyLottery/period/remain/<id>  → 抽奖余额预检（只读）
 GET  /qwhdhub/diyLottery/lotterySafely/<id>  → 抽奖一次（无 body，Referer=活动页）
 ```
@@ -248,6 +294,20 @@ POST /qwhdhub/account/query                         → 评价币余额/账本�
 GET  /qwhdhub/activity/info                         → 档位名称与所需评价币
 GET  /qwhdhub/assess/prizeStatus                    → 库存/资格 + 月剩余兑换次数
 GET  /qwhdhub/assess/redeem?prizeId=<id>&time=<ms>  → 兑换卡券
+```
+
+周三充值日（`cmcc_wed.py`，hlwyxhdhub）：
+
+```
+GET  /qwhdsso/login?actUrl=<act-wedrecharge 页>     → 同一 SSO，签发 HLWHD_SESSION_TOKEN
+POST /hlwyxhdhub/api/wedrecharge/queryActivityInfo  → 进页登记（每日登录任务随之发放）
+POST /hlwyxhdhub/api/wedrecharge/queryPictureActInfo→ drawTimes/activeIndex/pictureList
+POST /hlwyxhdhub/api/wedrecharge/taskList           → 任务清单（status 0 未做 / 2 不可再做）
+POST /hlwyxhdhub/api/wedrecharge/finishTask         → {"taskId":"<id>"} 任务完成上报，+1 次
+POST /hlwyxhdhub/api/wedrecharge/drawPicture        → {"round":"dp<N>"} 抽一片拼图
+POST /hlwyxhdhub/api/wedrecharge/receiveNew         → {"round":"r6/r5/r4"} 集齐领取话费券
+POST /hlwyxhdhub/api/wedrecharge/queryDrawPrizeInfo → 场次状态（rdStatus）+ 服务器时钟
+POST /hlwyxhdhub/api/wedrecharge/drawPrize          → 场次抽奖/秒杀（开场即开奖）
 ```
 
 话费余额（`cmcc_fee.py`，充值页 H5 通道）：
@@ -276,4 +336,4 @@ GET touch.10086.cn/i/v1/fee/real/<加密手机号>       → outParam 双层 bas
 
 ## 免责声明
 
-本项目基于抓包逆向的非公开接口实现，仅供自动化技术学习与个人效率研究，与中国移动官方无任何关联。使用本脚本自动完成签到、领奖、限时秒杀、满意度评价（尤其是非本人真实意愿的满分评价）等操作，可能违反中国移动 App 用户协议及相关活动规则，涉及奖励领取的真实性与公平性问题，并可能导致账号被风控、奖励清零、限制或封禁；活动接口随 App 版本与运营策略调整可能随时变更或失效。项目涉及的 `app_token`、jwt 缓存与会话 Cookie 均为账号敏感凭证，请妥善保管、切勿外传，因凭证泄露造成的账号损失由使用者自行承担。是否使用、如何使用由使用者自行决定，作者与贡献者不对由此产生的任何账号、财产、法律或其他后果负责。本脚本仅供个人号码自动化使用，请勿高频调用、批量多开或用于商业用途。请遵守平台规则与当地法律法规。
+本项目基于抓包分析的活动接口实现，仅供自动化技术学习与个人效率研究，与中国移动官方无任何关联。使用本脚本自动完成签到、领奖、限时秒杀、满意度评价（尤其是非本人真实意愿的满分评价）等操作，可能违反中国移动 App 用户协议及相关活动规则，涉及奖励领取的真实性与公平性问题，并可能导致账号被风控、奖励清零、限制或封禁；活动接口随 App 版本与运营策略调整可能随时变更或失效。项目涉及的 `app_token`、jwt 缓存与会话 Cookie 均为账号敏感凭证，请妥善保管、切勿外传，因凭证泄露造成的账号损失由使用者自行承担。是否使用、如何使用由使用者自行决定，作者与贡献者不对由此产生的任何账号、财产、法律或其他后果负责。本脚本仅供个人号码自动化使用，请勿高频调用、批量多开或用于商业用途。请遵守平台规则与当地法律法规。
