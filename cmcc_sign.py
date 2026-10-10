@@ -11,7 +11,7 @@
   3. GET  <活动页?token=QWHDSSOD...>            服务器 Set-Cookie: QWHD_SESSION_TOKEN (30分钟)
   4. POST /qwhdhub/api/mark/mark31/markstatus   查询签到状态（幂等保护）
   5. POST /qwhdhub/api/mark/mark31/domark       执行签到 {"date":"YYYYMMDD"}
-  6. (可选) POST /qwhdhub/api/mark/mark31/taskAward/<id>  领取连签奖励
+  6. POST /qwhdhub/api/mark/mark31/taskAward/<id>  领取累计/连签奖励（默认开启，--no-claim 跳过）
 
 配置来源（优先级：环境变量 > config.json > 默认值）：
   CMCC_APP_TOKEN     App 原生票据，形如 "JSESSIONID=...; UID=...; ticketID=NingBo"（需抓包获取）
@@ -23,9 +23,9 @@
   CMCC_SERVERCHAN_SENDKEY / CMCC_BARK_URL  通知渠道（可选）
 
 用法：
-  python3 cmcc_sign.py --config config.json            # 常规签到
-  python3 cmcc_sign.py --dry-run                       # 只查状态不签到
-  python3 cmcc_sign.py --claim                         # 签到后尝试领取连签奖励
+  python3 cmcc_sign.py --config config.json            # 常规签到（自动领累计/连签奖励）
+  python3 cmcc_sign.py --dry-run                       # 只查状态，同时报「可领未领」奖励
+  python3 cmcc_sign.py --no-claim                      # 只签到，不领奖
   python3 cmcc_sign.py --delay 600                     # 启动前随机延迟 0~600 秒（防风控）
 
 退出码：0 = 签到成功或今日已签；1 = 失败（便于 CI 判断）
@@ -298,9 +298,12 @@ def do_mark(s: requests.Session, referer: str, date: str) -> dict:
 
 
 def claim_task_awards(s: requests.Session, referer: str, status_data: dict) -> list[str]:
-    """尝试领取 taskAwardChance 里的连签奖励（热门奖品库存紧张，领不到属正常）。
+    """领取 taskAwardChance 里的累计/连签奖励（热门奖品库存紧张，领不到属正常）。
 
-    结果行附带奖品名称（从活动数据中按任务 ID 反查），便于推送里直接识别领到了什么。
+    服务端把"当前可领"的奖励算好放在 taskAwardChance（App 打开签到页弹窗领的就是
+    同一批），领取后条目即从清单消失，重复运行天然幂等。领取成功时奖品名在响应
+    data.prizeName 里（taskAwardChance 条目自身 prize=null，任务池里也未必查得到名
+    字），仅在拿不到 prizeName 时才回退用任务池里的名称展示。
     """
     # 任务ID -> 奖品名（taskAwardChance 条目自身或 accumulateTaskInfo/myTaskInfo 中同名任务；
     # 各池信息详略不一，只有取到非空名称才登记，避免空值抢先占位）
@@ -317,6 +320,15 @@ def claim_task_awards(s: requests.Session, referer: str, status_data: dict) -> l
             if name:
                 names[tid] = name
 
+    def label(task: dict) -> str:
+        tid = task.get("id") or "?"
+        bits = []
+        if task.get("taskType") == "accumulate" and task.get("num"):
+            bits.append(f"累计{task['num']}签")
+        if names.get(tid):
+            bits.append(names[tid])
+        return f"任务{tid}" + (f"（{'·'.join(bits)}）" if bits else "")
+
     results = []
     for task in status_data.get("taskAwardChance") or []:
         tid = task.get("id")
@@ -324,10 +336,17 @@ def claim_task_awards(s: requests.Session, referer: str, status_data: dict) -> l
             continue
         r = s.post(f"{API_MARK}/mark31/taskAward/{tid}", json={}, headers=api_headers(referer), timeout=30)
         resp = r.json()
-        # status 为 None 时回落到 code（实测领奖成功响应 status 可能为空）
-        status_text = resp.get("status") or resp.get("code") or "?"
-        label = f"任务{tid}" + (f"（{names[tid]}）" if names.get(tid) else "")
-        results.append(f"{label}: {status_text} {resp.get('msg')}")
+        data = resp.get("data") or {}
+        # status 为 None 时回落到 code（实测领奖成功响应 status 可能为空）；
+        # 成功领取时 data 带 prizeName/prizeValue，直接展示领到了什么
+        if isinstance(data, dict) and data.get("prizeName"):
+            value = data.get("prizeValue")
+            unit = {"FLOW": "MB", "FEE": "元"}.get(data.get("prizeCategory"), "")
+            amount = f"{value}{unit}" if value else ""
+            results.append(f"{label(task)} 领到: {data['prizeName']}" + (f"（{amount}）" if amount else ""))
+        else:
+            status_text = resp.get("status") or resp.get("code") or "?"
+            results.append(f"{label(task)}: {status_text} {resp.get('msg')}")
         time.sleep(random.uniform(1, 2))
     return results
 
@@ -373,7 +392,7 @@ def notify(cfg: Config, title: str, detail: str):
 
 # ---------------------------------------------------------------- 主流程
 
-def run(cfg: Config, dry_run: bool, claim: bool, tasks: bool = False, games: bool = False) -> int:
+def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False, games: bool = False) -> int:
     today = datetime.now().strftime("%Y%m%d")
 
     # 重建会话的兜底：第一次失败若是会话问题，重建后再试一次
@@ -420,22 +439,31 @@ def run(cfg: Config, dry_run: bool, claim: bool, tasks: bool = False, games: boo
                 if prize:
                     lines.append(f"获得奖品: {prize}")
                 elif status == "PRIZE_NO_CONFIG":
-                    lines.append("今日无单日奖品（奖励按累计签到门槛发放）")
+                    lines.append("今日无单日奖品（累计/连签奖励见下方领奖结果）")
         else:
             detail = f"签到失败: {code} / {status} / {msg}"
             notify(cfg, "移动签到失败", f"{detail}\n手机尾号 {cfg.phone[-4:]}")
             log.error(detail)
             return 1
 
-    if claim and not dry_run:
+    # 领奖：门槛达标的累计/连签奖励不会自动发放（App 是打开签到页弹窗时领），
+    # 这里默认代领。dry-run 下只报「可领未领」，不做任何写操作。
+    if claim:
         try:
             latest = query_markstatus(s, referer)
             chances = latest.get("taskAwardChance") or []
-            if not chances:
-                log.info("[领奖] 当前无可领取的连签任务")
-            for line in claim_task_awards(s, referer, latest):
-                log.info("[领奖] %s", line)
-                lines.append(f"[领奖] {line}")
+            if dry_run:
+                for t in chances:
+                    lines.append(f"[领奖] [dry-run] 发现可领未领奖励: 任务{t.get('id')}"
+                                 f"（累计{t.get('num')}签，正式运行将自动领取）")
+                if not chances:
+                    lines.append("[领奖] 当前无可领取的累计/连签奖励")
+            elif not chances:
+                log.info("[领奖] 当前无可领取的累计/连签奖励")
+            else:
+                for line in claim_task_awards(s, referer, latest):
+                    log.info("[领奖] %s", line)
+                    lines.append(f"[领奖] {line}")
         except Exception as e:
             lines.append(f"[领奖] 尝试失败: {e}")
 
@@ -470,8 +498,10 @@ def run(cfg: Config, dry_run: bool, claim: bool, tasks: bool = False, games: boo
 def main() -> int:
     parser = argparse.ArgumentParser(description="中国移动 App 签到自动脚本")
     parser.add_argument("--config", default="config.json", help="配置文件路径（默认 config.json）")
-    parser.add_argument("--dry-run", action="store_true", help="只查询状态，不执行签到")
-    parser.add_argument("--claim", action="store_true", help="签到后尝试领取连签奖励")
+    parser.add_argument("--dry-run", action="store_true", help="只查询状态，不执行签到/领奖")
+    parser.add_argument("--claim", dest="claim", action="store_true", default=True,
+                        help="签到后自动领取累计/连签奖励（默认开启）")
+    parser.add_argument("--no-claim", dest="claim", action="store_false", help="跳过领奖，只签到")
     parser.add_argument("--tasks", action="store_true",
                         help="顺带完成签到页 AI豆任务（需 cmcc_extra.py）")
     parser.add_argument("--games", action="store_true",

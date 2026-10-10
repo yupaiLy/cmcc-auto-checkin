@@ -21,9 +21,9 @@
 ```bash
 pip3 install -r requirements.txt     # 或最小安装：pip3 install requests cryptography
 cp config.example.json config.json   # 填入自己的 app_token 和手机号
-python3 cmcc_sign.py                 # 签到
-python3 cmcc_sign.py --dry-run       # 只查状态
-python3 cmcc_sign.py --claim         # 签到后顺带尝试领连签奖励
+python3 cmcc_sign.py                 # 签到 + 自动领取累计/连签奖励（默认开启）
+python3 cmcc_sign.py --dry-run       # 只查状态，并报告「可领未领」奖励
+python3 cmcc_sign.py --no-claim      # 只签到，不领奖
 python3 cmcc_sign.py --delay 600     # 随机延迟 0~600 秒执行（防风控）
 python3 cmcc_sign.py --tasks         # 签到 + 顺带领签到页 AI豆任务
 python3 cmcc_sign.py --games         # 三拓展活动：打卡 + 代币任务 + 到窗口自动抽奖
@@ -225,7 +225,7 @@ POST /qwhdsso/appTokenLogin?sid=...          → {token:App票据,...} 换取跳
 GET  <活动页?token=QWHDSSOD...>              → Set-Cookie: QWHD_SESSION_TOKEN(30分钟)
 POST /qwhdhub/api/mark/mark31/markstatus {}  → 查签到状态（幂等）
 POST /qwhdhub/api/mark/mark31/domark         → {"date":"YYYYMMDD"} 执行签到
-POST /qwhdhub/api/mark/mark31/taskAward/<id> → 领连签奖励（--claim）
+POST /qwhdhub/api/mark/mark31/taskAward/<id> → 领累计/连签奖励（默认开启，--no-claim 跳过）
 ```
 
 拓展活动（`cmcc_extra.py`）：
@@ -266,7 +266,13 @@ GET touch.10086.cn/i/v1/fee/real/<加密手机号>       → outParam 双层 bas
 - **系统代理**：本机开着抓包/代理工具时证书会被 MITM，脚本已禁用代理继承直连；
 - **请求头**：UA 需含 `leadeon`，API 需带 `login-check: 1` 与 `x-requested-with`；
 - `domark` 返回 `code=SUCCESS` + `status=PRIZE_NO_CONFIG` 表示签到成功、当日无单日奖品；
-- 重复签到服务端返回 `HAVE_MARKED`，脚本视为幂等成功。
+- 重复签到服务端返回 `HAVE_MARKED`，脚本视为幂等成功；
+- **累计/连签奖励不会随签到自动发放**：门槛达标后服务端只把它放进 `markstatus`
+  响应的 `taskAwardChance` 可领清单，需再调 `taskAward/<id>` 才真正发放
+  （App 内是打开签到页弹窗时领取，不进页面就一直挂着）。脚本默认在签到后
+  重查一次 `taskAwardChance` 并逐个领取；领取后条目即从清单消失，天然幂等。
+  领取结果里的奖品名来自响应 `data.prizeName`（可领清单条目本身不带名字）；
+  热门奖品可能返回 `PRIZE_NO_STOCK`（发完），属正常现象。
 
 ## 免责声明
 
