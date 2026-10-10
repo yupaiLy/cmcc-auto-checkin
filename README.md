@@ -1,339 +1,219 @@
-# 中国移动 App 自动签到（签到领流量/话费）
+# 中国移动 App 自动签到与活动自动化
 
-基于抓包分析的中国移动 App「网签领流量」H5 活动自动化脚本合集。
-主签到 / 秒杀 / 评价仅依赖 `requests`；话费余额查询（`cmcc_fee.py`）另需 `cryptography`（AES 解密）。
+一套基于抓包分析的中国移动 App 活动自动化脚本，覆盖签到领流量/话费、
+周三充值日拼图、评价有礼、限时秒杀、话费余额查询等日常活动。
+只需一次抓包获取凭证，之后长期自动运行；支持多账号、消息推送、定时任务。
 
-## 文件说明
+## 功能一览
 
-| 文件 | 说明 |
-|------|------|
-| `cmcc_sign.py` | 主脚本 |
-| `cmcc_extra.py` | 可选拓展模块：代币任务 / AI豆任务 / 抽奖消耗（`--tasks` / `--games`） |
-| `cmcc_seckill.py` | 假期秒杀抢券脚本(20-5门槛券) |
-| `cmcc_rate.py` | 评价有礼：每周自动满分评价 + 评价币兑换（`--exchange`） |
-| `cmcc_wed.py` | 周三充值日：进页领次数 + 代做可脚本任务 + 自动抽拼图 + 场次秒杀（`--wed` 也可挂主脚本） |
-| `cmcc_fee.py` | 话费余额查询（充值页 H5 通道，需 `fee_session_cookie`） |
-| `config.example.json` | 配置模板，复制为 `config.json` 后填写 |
-| `.cmcc_jwt_cache_<尾号>.json` | 运行后按账号自动生成的 jwt 凭证缓存（勿外传） |
-| `images/app-token-capture.png` | app_token 抓包位置示例图 |
+| 脚本 | 功能 | 频率建议 |
+|------|------|----------|
+| `cmcc_sign.py` | 每日签到、自动领取累计/连签奖励、AI豆任务、拓展活动、周三充值日 | 每天 1 次 |
+| `cmcc_wed.py` | 周三充值日：每日任务 + 抽拼图 + 集齐自动领券 + 场次秒杀 | 每天 1 次（秒杀仅周三） |
+| `cmcc_rate.py` | 评价有礼：每周满分评价得评价币，攒够自动兑换话费/流量券 | 每周 1 次 |
+| `cmcc_seckill.py` | 假期限时秒杀（如 5 元话费加赠券） | 仅活动期 |
+| `cmcc_fee.py` | 话费余额查询并推送 | 随意 |
+
+所有脚本共用一份配置和凭证，互不影响；每步结果都可通过 Server酱/Bark 推送到手机。
 
 ## 快速开始
 
 ```bash
-pip3 install -r requirements.txt     # 或最小安装：pip3 install requests cryptography
-cp config.example.json config.json   # 填入自己的 app_token 和手机号
-python3 cmcc_sign.py                 # 签到 + 自动领取累计/连签奖励（默认开启）
-python3 cmcc_sign.py --dry-run       # 只查状态，并报告「可领未领」奖励
-python3 cmcc_sign.py --no-claim      # 只签到，不领奖
-python3 cmcc_sign.py --delay 600     # 随机延迟 0~600 秒执行（防风控）
-python3 cmcc_sign.py --tasks         # 签到 + 顺带领签到页 AI豆任务
-python3 cmcc_sign.py --games         # 三拓展活动：打卡 + 代币任务 + 到窗口自动抽奖
-python3 cmcc_sign.py --games --dry-run   # 只报各活动状态与余额，零消耗
-python3 cmcc_seckill.py --dry-run        # 秒杀：查场次/校时/资格（活动期）
-python3 cmcc_rate.py --dry-run           # 评价有礼：查机会/余额/档位
-python3 cmcc_wed.py --dry-run            # 周三充值日：查次数/拼图进度/任务（只读）
-python3 cmcc_fee.py --config config2.json  # 话费余额查询（需 fee_session_cookie）
+pip3 install -r requirements.txt        # 最低安装：pip3 install requests
+cp config.example.json config.json      # 填入凭证（见下一节）
+python3 cmcc_sign.py                    # 首次运行
+python3 cmcc_sign.py --dry-run          # 或先只查状态，不做任何操作
 ```
 
-`--tasks` / `--games` 依赖同目录的 `cmcc_extra.py`（缺失时自动跳过并提示，不影响主签到）。
+运行后按手机尾号生成凭证缓存文件 `.cmcc_jwt_cache_<尾号>.json`，
+此后长期有效，**无需反复抓包**；多账号复制多份 config 并用 `--config` 区分。
 
-配置也可用环境变量覆盖（适合 CI）：`CMCC_APP_TOKEN`、`CMCC_PHONE`、
-`CMCC_PROVINCE_CODE`、`CMCC_CITY_CODE`、`CMCC_ACTIVITY_ID` 等。
+## 获取凭证（只需一次）
 
-## 如何获取 app_token（凭证）
-
-1. 手机装抓包工具（Proxyman / Charles / Stream 等），对 App 开启 SSL 抓包；
-2. 打开中国移动 App → 我的 → 签到领流量 进入签到页；
+1. 手机装抓包工具（Proxyman / Charles / Stream 等），对 App 开启 HTTPS 抓包；
+2. 打开中国移动 App → 我的 → 签到领流量，进入签到页；
 3. 在抓包记录中找到 `wx.10086.cn/qwhdsso/appTokenLogin` 这条 POST 请求；
-4. 复制请求体里 `token` 字段的完整值（形如
-   `JSESSIONID=xxxx; UID=xxxx; Comment=...; ticketID=NingBo`）填入配置。
-   尾部的 `Secure`/`Path` 等 Cookie 属性标记可留可删，服务端只解析 `JSESSIONID`/`UID` 名值对。
+4. 复制请求体里 `token` 字段的完整值填入 `config.json` 的 `app_token`
+   （形如 `JSESSIONID=xxx; UID=xxx; ...; ticketID=NingBo`，尾部属性标记可留可删）；
+5. 同一请求体里的 `provinceCode`、`cityCode` 一并照抄。
 
-![appTokenLogin 抓包示例](images/app-token-capture.png)
+![appToken 抓包位置示例](images/app-token-capture.png)
 
-省编码 `provinceCode`、市编码 `cityCode` 也在同一条请求体里，一并照抄。
-`app_token` 属于账号登录凭证，**只在本地使用，不要提交到公开仓库**。
+脚本会自动用 `app_token` 登录并续签一个长期凭证（jwt），之后每次运行优先
+用 jwt 续期，**App 内切换登录也不影响**。只有当脚本同时推送「jwt 续期失败」
+和「登录失败」时，才需要重新抓包更新 `app_token`。凭证属于账号敏感信息，
+只在本地使用，切勿外传。
 
-### jwt 续期（抓一次包即可长期使用）
+## 配置说明
 
-首次运行会用 `app_token` 引导登录，服务端同时签发一个账号级 jwt 并缓存到
-`.cmcc_jwt_cache_<尾号>.json`。之后每次运行脚本**优先用 jwt 续期**
-（实测 jwt 不受 App 内切换登录影响，app_token 失效后依然可用），
-`app_token` 仅在 jwt 缺失或失效时作兜底引导。
+`config.json` 各字段（均可被同名环境变量覆盖，适合 CI）：
 
-因此日常无需反复抓包；只有当脚本同时报「jwt 续期失败」和
-「appTokenLogin 失败」并推送通知时，才需要重新抓包更新 `app_token`。
-缓存按手机尾号隔离并校验归属，多账号/换号配置不会串用凭证。
+| 字段 | 说明 | 默认 |
+|------|------|------|
+| `app_token` | App 票据，抓包获取（环境变量 `CMCC_APP_TOKEN`） | 必填 |
+| `phone` | 手机号（`CMCC_PHONE`） | 必填 |
+| `province_code` / `city_code` | 省/市编码（`CMCC_PROVINCE_CODE` / `CMCC_CITY_CODE`） | 731 / 0731 |
+| `fee_session_cookie` | 话费查询用会话，见 `cmcc_fee.py` 一节（`CMCC_FEE_SESSION`） | 选填 |
+| `serverchan_sendkey` | Server酱推送（`CMCC_SERVERCHAN_SENDKEY`） | 选填 |
+| `bark_url` | Bark 推送，形如 `https://api.day.app/你的key`（`CMCC_BARK_URL`） | 选填 |
+| `activity_id` / `channel_id` / `carrier_operator` / `app_version_code` | 活动参数，照抄模板即可 | 已填好 |
 
-## 定时执行
+多账号：复制 `config.json` 为 `config2.json` 填入另一号码，运行时加
+`--config config2.json`。凭证缓存按尾号自动隔离，不会串号。
 
-### macOS launchd / crontab
+## 每日主脚本 `cmcc_sign.py`
+
+默认运行做两件事：**每日签到** 和 **自动领取累计/连签奖励**。
+AI豆任务、拓展活动、周三充值日通过参数选择，可任意组合：
 
 ```bash
-crontab -e
-# 每天早上 8 点 23 分执行（避开整点）
-23 8 * * * cd /path/to/cmcc-auto-checkin && /usr/bin/python3 cmcc_sign.py --delay 1800 >> sign.log 2>&1
+python3 cmcc_sign.py                          # 签到 + 领取累计/连签奖励
+python3 cmcc_sign.py --tasks --games --wed    # 再加上全部顺带活动
+
+# 按需单独叠加
+python3 cmcc_sign.py --tasks                  # 加做 AI豆任务
+python3 cmcc_sign.py --games                  # 加做拓展活动
+python3 cmcc_sign.py --wed                    # 加做周三充值日
+
+# 其他选项
+python3 cmcc_sign.py --dry-run                # 只查状态，零操作
+python3 cmcc_sign.py --no-claim               # 只签到，不领奖励
+python3 cmcc_sign.py --delay 1800             # 启动前随机延迟 0~1800 秒（防风控，定时任务建议加）
 ```
 
-### GitHub Actions
+各部分说明：
 
-`.github/workflows/sign.yml`（注意：在 App 内切换账号登录会使 `app_token` 失效，
-使用云上定时方案时请留意凭证状态）：
+- **签到与累计奖励**：完成当日签到；累计签到达到门槛的奖励（话费券/流量券）
+  自动领取，热门奖励被领光时会在推送中如实说明；
+- **AI豆任务**（`--tasks`）：自动完成任务列表中可线上完成的部分
+  （功能体验/福利活动/业务办理等区），外部合作区任务需要真实进入
+  合作方 App，由合作方记账，脚本不做；
+- **拓展活动**（`--games`）：周六游戏中心、追剧领福利等页面的打卡、
+  任务与抽奖。内置窗口闸门：未到开放窗口只查余额不消耗；
+- **周三充值日**（`--wed`）：详见下一节。
 
-```yaml
-name: cmcc-sign
-on:
-  schedule:
-    - cron: "37 0 * * *"   # UTC 时间，对应北京时间 8:37（分钟避开整点）
-  workflow_dispatch:
-jobs:
-  sign:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install requests
-      - run: python cmcc_sign.py --delay 3600
-        env:
-          CMCC_APP_TOKEN: ${{ secrets.CMCC_APP_TOKEN }}
-          CMCC_PHONE: ${{ secrets.CMCC_PHONE }}
-          CMCC_BARK_URL: ${{ secrets.CMCC_BARK_URL }}  # 可选
+## 周三充值日 `cmcc_wed.py`
+
+活动玩法：做任务攒抽奖次数 → 抽拼图碎片 → 集齐解锁话费券
+（95折 4片 → 9折 6片 → 8折 9片，依次解锁）。
+
+```bash
+python3 cmcc_wed.py                     # 进页 + 自动任务 + 抽光当日次数 + 集齐自动领券
+python3 cmcc_wed.py --dry-run           # 只查次数/拼图进度/任务状态
+python3 cmcc_sign.py --wed              # 或挂在主签到后一起跑
 ```
-## 通知（可选）
 
-- **Server酱**：填 `serverchan_sendkey`，签到结果推送到微信；
-- **Bark**（iOS）：填 `bark_url`（形如 `https://api.day.app/你的key`）。
+自动化的内容：
 
-## 假期秒杀抢券（可选）
+- **进页**：「每日登录」任务自动 +1 次；
+- **任务**：游戏日/视频日、一豆有好礼、看精彩视频、查话费余额、查账单、
+  瓜分话费等可线上完成的任务全部自动完成（各 +1 次），服务端新增任务
+  也会自动覆盖；「参与签到并浏览5秒」需在 App 内真实浏览签到页、
+  邀请助力需真实受邀者、充值任务涉及真实消费，这三类不代做；
+- **抽奖与领取**：抽光当日全部次数；某档拼图集齐后自动进位下一档并领取
+  该档话费券（奖励月底清零，已领过的不会重复领）；
+- **周三 8 点秒杀**（`--seckill`）：自动校准服务器时钟，到点前 0.4 秒开始
+  连发抢券，抢中即停并推送，无库存自动止盈。
+
+```bash
+python3 cmcc_wed.py --seckill --dry-run      # 查时钟偏差与场次状态
+python3 cmcc_wed.py --seckill                # 周三等 08:00 自动开抢
+python3 cmcc_wed.py --seckill --at 12:00:00  # 指定其他场次
+```
+
+## 评价有礼 `cmcc_rate.py`
+
+每周做一次 App 满意度评价（满分 10 分得 10 评价币），评价币可兑换
+流量/话费券（如 2 元话费券 20 币，每月限兑 4 次，活动结束清零）。
+
+```bash
+python3 cmcc_rate.py --dry-run              # 查评价机会/币余额/档位（只读）
+python3 cmcc_rate.py                        # 本周未评则自动满分评价
+python3 cmcc_rate.py --exchange             # 攒够 20 币自动兑「2元话费券」（不足跳过）
+python3 cmcc_rate.py --exchange <prizeId>   # 兑指定档位
+```
+
+每日运行亦可（按周幂等，重复运行不会重复评价）。档位与所需评价币
+以 `--dry-run` 实时输出为准。
+
+## 假期限时秒杀 `cmcc_seckill.py`
 
 「签到有礼」页的限时秒杀（如 5 元话费加赠券）：完成当日签到即获资格，
-每日 12:00 开抢、数量有限。会话/配置/通知与 `cmcc_sign.py` 完全共用，
-无新增配置字段；当日未签会先自动补签再抢。场次时间以服务端 `secConfig`
-返回为准，脚本自动选定进行中/最近的一场，活动改期无需改脚本。
-
-### 快速开始
-
-1. 主签到能跑即可直接用（同一份 `config.json`；多账号加 `--config` 指定）；
-2. 查场次与校时：`python3 cmcc_seckill.py --dry-run` —— 列出场次/奖品、
-   服务器时钟偏移、资格状态，**不开抢**（注意：资格=当日签到，
-   未签时该步会真实补签获取资格）；
-3. 实抢：活动期挂上 crontab（见下），或开抢前几分钟手动运行
-   `python3 cmcc_seckill.py`，到点自动出手，走 Bark/Server酱 推送。
+每日 12:00 开抢、数量有限。会话与配置和主脚本完全共用。
 
 ```bash
-python3 cmcc_seckill.py --dry-run    # 查场次/校时/资格，不抢
-python3 cmcc_seckill.py --once       # 立即打一发 redeem（验证响应格式）
-python3 cmcc_seckill.py              # 常驻等到下一场开抢（12:00 前几分钟启动即可）
+python3 cmcc_seckill.py --dry-run    # 查场次/校时/资格（未签会自动补签获资格）
+python3 cmcc_seckill.py --once       # 立即试发一发，验证响应
+python3 cmcc_seckill.py              # 常驻等到下一场自动开抢
 python3 cmcc_seckill.py --at 11:59:50 --interval 0.2   # 调参
 ```
 
-抢购节奏默认提前 0.4 秒出手（`--lead`，抵消网络延迟）、每 0.35 秒一发
-（`--interval`，最多 `--max-attempts` 120 发）；redeem 返回 `PRIZE_NO_STOCK`
-（抢完）或 `PRIZE_LIMIT_*`（限次）即停，不打空枪。退出码 `0`=抢到、
-`1`=未中/异常，便于外层脚本判断。crontab 示例（活动日 11:55 启动，仅活动期需要挂着，非活动日运行会因无场次而推送异常通知）：
+默认提前 0.4 秒出手、每 0.35 秒一发、最多 120 发；抢完或达到限次即停。
+退出码 `0`=抢到、`1`=未中，便于外层脚本判断。非活动日运行会因无场次推送异常。
+
+## 话费余额查询 `cmcc_fee.py`
+
+查询实时话费余额并推送（走充值页通道，需额外安装 `cryptography`，
+requirements.txt 已包含）。会话为半自动：服务端要求 App 签发的
+`jsessionid-cmcc`，获取步骤：
+
+1. 手机保持代理，在 App 内打开一次「充值页」；
+2. 抓包工具里找任意 `touch.10086.cn` 请求，复制 Cookie 中
+   `jsessionid-cmcc=` 的值；
+3. 填入配置的 `fee_session_cookie`。
+
+![话费会话抓包示例](images/fee-session-capture.png)
 
 ```bash
-55 11 * * * cd /path/to/cmcc-auto-checkin && /usr/bin/python3 cmcc_seckill.py >> seckill.log 2>&1
+python3 cmcc_fee.py --config config.json    # 查询并推送话费余额
 ```
 
-## 评价有礼（可选，`cmcc_rate.py`）
+会话失效后脚本报 `500003` 并提示，重新抓一次即可；查询本身只读。
 
-「评价得好礼」活动（湖南，2026-12-31 结束）：每周可做一次 App 满意度评价，
-满分 10 分得 10 评价币；评价币可兑流量/话费券——500M 月包/1GB 日包 10 币、
-2GB 日包/2 元话费券 20 币，每月限兑 4 次，活动结束评价币清零。
-会话/配置/通知与 `cmcc_sign.py` 完全共用，无新增配置字段。
+## 定时任务
 
-### 快速开始
-
-1. 主签到能跑即可直接用（同一份 `config.json`；多账号加 `--config` 指定）；
-2. 查状态：`python3 cmcc_rate.py --dry-run` —— 查本周评价机会、评价币
-   余额、各档位价格/库存（只读）；
-3. 评价与兑换：`python3 cmcc_rate.py` 本周未评则自动满分评价（按 `chance`
-   幂等，挂每日定时即可，无需挑时间）；`--exchange` **不带参数默认兑
-   「2元话费券」**（余额不足会跳过，适合挂定时攒够 20 币自动兑）；
-   `--exchange <prizeId>` 兑指定档位。
-
-档位与 prizeId 对照（以 `--dry-run` 实时输出为准）：
-
-| prizeId | 奖品 | 所需评价币 |
-|---------|------|-----------|
-| 2020419116 | 1GB流量日包 | 10 |
-| 2020419118 | 500M流量月包 | 10 |
-| 2020419114 | 2GB流量日包 | 20 |
-| 2020419120 | 2元话费券 | 20 |
+macOS crontab 示例（按需取舍，路径替换为实际目录）：
 
 ```bash
-python3 cmcc_rate.py --dry-run              # 查机会/余额/档位（只读）
-python3 cmcc_rate.py                        # 本周未评则自动满分评价 +10 币
-python3 cmcc_rate.py --exchange             # 默认兑 2元话费券（20 币，不足跳过）
-python3 cmcc_rate.py --exchange 2020419116  # 兑 1GB流量日包（10 币）
-```
+# 每天 8:23 主脚本（签到+领奖+AI豆+拓展+周三充值日），随机延迟半小时内
+23 8 * * * cd /path/to/cmcc-auto-checkin && /usr/bin/python3 cmcc_sign.py --tasks --games --wed --delay 1800 >> sign.log 2>&1
 
-字段备注：脚本展示的「评价币余额」来自 `account/query` 的 `balance`；
-`prizeStatus.remain` 是「月剩余兑换次数」。评价成功
-评价币实时到账，所兑卡券 48 小时内发放至 App「我的奖品」，券有效期 10 天。
-
-## 周三充值日拼图抽奖（可选，`cmcc_wed.py`）
-
-「周三充值日」活动（hlwyxhdhub，活动页 `act-wedrecharge/1024101716`）：做任务攒
-抽奖次数，抽拼图碎片集齐解锁话费券——95折（4片）→ 9折（6片）→ 8折（9片）依次解锁
-不可跳级，碎片随机、重复抽到会累计为副本。会话与凭证完全复用主脚本（jwt 跨 hub
-通用，本活动签发 `HLWHD_SESSION_TOKEN`），无新增配置字段。
-
-每日自动化内容：
-
-- **进页**：SSO 换会话时即访问活动页，「每日登录」任务自动 +1 次；
-- **任务**：自动完成签到页浏览、游戏日/视频日浏览、一豆有好礼、看精彩视频、
-  查话费余额、查账单、瓜分话费共 8 项日常任务，每项 +1 次；邀请助力、
-  真实充值两类涉及真人操作或消费，不代做，只报告状态；
-- **抽奖**：自动抽光当日全部次数；当前档位集齐后自动进入下一档
-  （95折 4片 → 9折 6片 → 8折 9片）。`--dry-run` 全程只读。
-- **领取**：档位集齐后自动领取对应话费券（奖励月底清零，故默认代领），
-  已领取过的不会重复领取。
-
-```bash
-python3 cmcc_wed.py --dry-run        # 查次数/拼图进度/任务状态（零消耗）
-python3 cmcc_wed.py                  # 进页 + 代做任务 + 抽光当日次数
-python3 cmcc_sign.py --wed           # 或挂在主签到后一起跑
-```
-
-### 周三充值日秒杀（`--seckill`）
-
-活动内置场次秒杀（充值立减券/折扣券等，每周三 8 点场，服务端 `seckillTime`
-可配多场）。抢购端点为 `drawPrize`（实测未开场返回「活动还未开始」的时间条件
-错误，开场后同一请求即开奖）。脚本自动校准服务器时钟（本机偏差实测 ±0.1s），
-到点前 0.4s 开始连发（间隔 0.35s、预算 120 发可调），抢中即停并推送券名，
-无库存等终态自动止盈，每发响应均写日志。
-
-```bash
-python3 cmcc_wed.py --seckill --dry-run     # 查时钟偏差/场次状态，不发请求
-python3 cmcc_wed.py --seckill               # 等到 08:00:00（服务器时间）自动开抢
-python3 cmcc_wed.py --seckill --at 12:00:00 # 指定其他场次
-```
-
-crontab 示例（周三 07:55 启动，仅活动期需要挂着）：
-
-```bash
+# 周三 7:55 充值日秒杀（仅活动期需要挂着）
 55 7 * * 3 cd /path/to/cmcc-auto-checkin && /usr/bin/python3 cmcc_wed.py --seckill >> wed_seckill.log 2>&1
+
+# 每周一 9:17 评价有礼
+17 9 * * 1 cd /path/to/cmcc-auto-checkin && /usr/bin/python3 cmcc_rate.py --exchange >> rate.log 2>&1
 ```
 
-## 话费余额查询（可选，`cmcc_fee.py`）
+分钟刻意避开整点，配合 `--delay` 随机延迟降低风控风险。
+GitHub Actions 亦可（secrets 里配 `CMCC_APP_TOKEN`、`CMCC_PHONE` 等
+环境变量即可，无需 config 文件）；注意在 App 内切换账号登录会使
+`app_token` 失效，云上定时请留意推送的失败告警。
 
-查询实时话费并推送：话费余额（`realBalanceFee`）与实时话费（`realFee`）。
-接口走充值页 H5 通道（`touch.10086.cn/i/v1/fee/real`），加密体系为
-AES-128-CBC（key=iv，密钥嵌在页面 JS 中，脚本已内置），手机号加密后
-作为路径参数传入，无需额外凭证。**注意：本脚本是唯一需要额外依赖的**——
-AES 解密依赖 `cryptography`（`pip3 install cryptography`，requirements.txt 已包含）。
+## 常见问题
 
-会话为**半自动**（关键限制）：服务端要求已绑定账号的 `jsessionid-cmcc`
-会话，该会话由 App 原生侧签发，纯 HTTP 无法自助建立（`qwhdsso` 的
-actUrl 白名单拒绝 touch 域名，实测返回「非法活动地址」）。获取步骤：
-
-1. 手机保持代理（Proxyman 等）；
-2. 中国移动 App 内打开一次「充值页」；
-3. 在 Proxyman 里找任意一条 `touch.10086.cn` 请求，复制 Cookie 中
-   `jsessionid-cmcc=` 后面的值；
-4. 填入配置的 `fee_session_cookie`（或环境变量 `CMCC_FEE_SESSION`）。
-
-![话费余额会话抓包示例](images/fee-session-capture.png)
-
-会话失效后脚本报 `500003` 并提示，重新抓一次即可；查询本身为只读。
-
-```bash
-python3 cmcc_fee.py --config config2.json    # 查询并推送话费余额
-```
-
-## 拓展活动（可选，`cmcc_extra.py`）
-
-同一 SSO 通道（wx.10086.cn / qwhdhub）下还有三类收益，凭证与会话完全复用主脚本
-（jwt 续期缓存同样生效），通过 `--tasks` / `--games` 开启：
-
-| 体系 | 内容 | 开关 |
-|------|------|------|
-| mark/task | 签到页 AI豆任务（到访 + finish + 领奖，57 项中约 1/3 可纯 HTTP 完成） | `--tasks` |
-| diyTask | 三活动页代币任务（浏览/分享类任务可自动完成并领取） | `--games` |
-| diyLottery | 抽奖消耗：周六游戏中心（游戏币 10/次，周六 12:00 起奖池拓展）、追剧领福利（次数 1/抽，仅周日开放） | `--games` |
-
-抽奖内置**窗口闸门**：非窗口日只报余额不消耗（游戏币攒到周六拓展池一次抽光，
-币按 31 天周期清零），到窗口才真扣；幂等由服务端余额保证，重复运行不多扣资产。
-未中奖（`NOT_WON`）按正常结果处理而非错误：游戏币未中即停（防奖池抽空后白扣币），
-追剧次数未中继续抽满（次数过期作废）。`--dry-run` 下全部只读，零消耗。
-
-活动页 URL / 组件 ID 写在 `cmcc_extra.py` 的 `ACTS` 注册表里，属公开配置；
-不同省份入口不同时替换 query 参数即可。
-
-## 实现说明（接口链路）
-
-```
-GET  /qwhdsso/login?actUrl=<活动页>          → 提取一次性 sid
-POST /qwhdsso/appTokenLogin?sid=...          → {token:App票据,...} 换取跳转 URL
-GET  <活动页?token=QWHDSSOD...>              → Set-Cookie: QWHD_SESSION_TOKEN(30分钟)
-POST /qwhdhub/api/mark/mark31/markstatus {}  → 查签到状态（幂等）
-POST /qwhdhub/api/mark/mark31/domark         → {"date":"YYYYMMDD"} 执行签到
-POST /qwhdhub/api/mark/mark31/taskAward/<id> → 领累计/连签奖励（默认开启，--no-claim 跳过）
-```
-
-拓展活动（`cmcc_extra.py`）：
-
-```
-POST /qwhdhub/api/mark/task/taskList         → AI豆任务清单（--tasks）
-POST /qwhdhub/api/mark/task/finishTask       → 完成到访类任务并领取奖励
-GET  /qwhdhub/diyTask/list/<componentId>     → 代币任务清单
-POST /qwhdhub/diyTask/finish/<taskId>        → 完成任务并领取代币
-POST /qwhdhub/diyLottery/period/remain/<id>  → 抽奖余额预检（只读）
-GET  /qwhdhub/diyLottery/lotterySafely/<id>  → 抽奖一次（无 body，Referer=活动页）
-```
-
-评价有礼（`cmcc_rate.py`）：
-
-```
-GET  /qwhdhub/assess/markStatus                     → 本周评价机会（chance）
-GET  /qwhdhub/assess/assess?score=10&time=<ms>      → 满分评价，+10 评价币
-POST /qwhdhub/account/query                         → 评价币余额/账本（balance）
-GET  /qwhdhub/activity/info                         → 档位名称与所需评价币
-GET  /qwhdhub/assess/prizeStatus                    → 库存/资格 + 月剩余兑换次数
-GET  /qwhdhub/assess/redeem?prizeId=<id>&time=<ms>  → 兑换卡券
-```
-
-周三充值日（`cmcc_wed.py`，hlwyxhdhub）：
-
-```
-GET  /qwhdsso/login?actUrl=<act-wedrecharge 页>     → 同一 SSO，签发 HLWHD_SESSION_TOKEN
-POST /hlwyxhdhub/api/wedrecharge/queryActivityInfo  → 进页登记（每日登录任务随之发放）
-POST /hlwyxhdhub/api/wedrecharge/queryPictureActInfo→ drawTimes/activeIndex/pictureList
-POST /hlwyxhdhub/api/wedrecharge/taskList           → 任务清单（status 0 未做 / 2 不可再做）
-POST /hlwyxhdhub/api/wedrecharge/finishTask         → {"taskId":"<id>"} 任务完成上报，+1 次
-POST /hlwyxhdhub/api/wedrecharge/drawPicture        → {"round":"dp<N>"} 抽一片拼图
-POST /hlwyxhdhub/api/wedrecharge/receiveNew         → {"round":"r6/r5/r4"} 集齐领取话费券
-POST /hlwyxhdhub/api/wedrecharge/queryDrawPrizeInfo → 场次状态（rdStatus）+ 服务器时钟
-POST /hlwyxhdhub/api/wedrecharge/drawPrize          → 场次抽奖/秒杀（开场即开奖）
-```
-
-话费余额（`cmcc_fee.py`，充值页 H5 通道）：
-
-```
-GET touch.10086.cn/i/v1/fee/real/<加密手机号>       → outParam 双层 base64
-  ?time=<ts>&channel=11                               + AES-CBC 解密 → 话费余额
-会话：jsessionid-cmcc（App 原生签发，半自动填入 fee_session_cookie）
-加密：AES-128-CBC，key = iv = 043AOQGK6ykklyZA（页面 JS 内置）
-```
-
-已知坑（脚本内已处理）：
-
-- **TLS 套件**：wx.10086.cn 网关只接受老式 TLS 套件（ECDHE-RSA-AES128-SHA），
-  Python 默认现代套件会握手失败，脚本挂载了自定义 SSL 适配器；
-- **系统代理**：本机开着抓包/代理工具时证书会被 MITM，脚本已禁用代理继承直连；
-- **请求头**：UA 需含 `leadeon`，API 需带 `login-check: 1` 与 `x-requested-with`；
-- `domark` 返回 `code=SUCCESS` + `status=PRIZE_NO_CONFIG` 表示签到成功、当日无单日奖品；
-- 重复签到服务端返回 `HAVE_MARKED`，脚本视为幂等成功；
-- **累计/连签奖励不会随签到自动发放**：门槛达标后服务端只把它放进 `markstatus`
-  响应的 `taskAwardChance` 可领清单，需再调 `taskAward/<id>` 才真正发放
-  （App 内是打开签到页弹窗时领取，不进页面就一直挂着）。脚本默认在签到后
-  重查一次 `taskAwardChance` 并逐个领取；领取后条目即从清单消失，天然幂等。
-  领取结果里的奖品名来自响应 `data.prizeName`（可领清单条目本身不带名字）；
-  热门奖品可能返回 `PRIZE_NO_STOCK`（发完），属正常现象。
+- **什么时候需要重新抓包？** 只有同时推送「jwt 续期失败」和「登录失败」时。
+  平时 jwt 自动续期，无需任何维护；
+- **推送里"领不到/已发完"是错误吗？** 不是。累计奖励和秒杀券数量有限，
+  被领光属正常，脚本会如实标注；
+- **"今日已签到（服务端幂等）"？** 同一天重复运行脚本安全，不会重复签到
+  或重复领奖；
+- **AI豆任务为什么有一些不完成？** 外部合作区（去快手/淘宝/支付宝等）
+  由合作方记账，需真实进入对方 App，脚本整区跳过；充值、公众号、
+  签到页浏览类需真实行为，失败后快速跳过并如实标注；
+- **多账号怎么跑？** 每账号一份 config，`--config` 指定，cron 里各加一行；
+- **运行有什么风险？** 请控制频率（脚本已内置随机延迟）、仅用于本人号码。
+  详见下方免责声明。
 
 ## 免责声明
 
-本项目基于抓包分析的活动接口实现，仅供自动化技术学习与个人效率研究，与中国移动官方无任何关联。使用本脚本自动完成签到、领奖、限时秒杀、满意度评价（尤其是非本人真实意愿的满分评价）等操作，可能违反中国移动 App 用户协议及相关活动规则，涉及奖励领取的真实性与公平性问题，并可能导致账号被风控、奖励清零、限制或封禁；活动接口随 App 版本与运营策略调整可能随时变更或失效。项目涉及的 `app_token`、jwt 缓存与会话 Cookie 均为账号敏感凭证，请妥善保管、切勿外传，因凭证泄露造成的账号损失由使用者自行承担。是否使用、如何使用由使用者自行决定，作者与贡献者不对由此产生的任何账号、财产、法律或其他后果负责。本脚本仅供个人号码自动化使用，请勿高频调用、批量多开或用于商业用途。请遵守平台规则与当地法律法规。
+本项目基于抓包分析的活动接口实现，仅供自动化技术学习与个人效率研究，
+与中国移动官方无任何关联。使用本脚本自动完成签到、领奖、限时秒杀、
+满意度评价（尤其是非本人真实意愿的满分评价）等操作，可能违反中国移动
+App 用户协议及相关活动规则，涉及奖励领取的真实性与公平性问题，并可能
+导致账号被风控、奖励清零、限制或封禁；活动接口随 App 版本与运营策略
+调整可能随时变更或失效。项目涉及的 `app_token`、jwt 缓存与会话 Cookie
+均为账号敏感凭证，请妥善保管、切勿外传，因凭证泄露造成的账号损失由
+使用者自行承担。是否使用、如何使用由使用者自行决定，作者与贡献者不对
+由此产生的任何账号、财产、法律或其他后果负责。本脚本仅供个人号码自动化
+使用，请勿高频调用、批量多开或用于商业用途。请遵守平台规则与当地法律法规。
