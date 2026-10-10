@@ -389,7 +389,11 @@ def notify(cfg: Config, title: str, detail: str):
             except ValueError as e:
                 log.warning("bark_url 校验失败，已跳过通知: %s", e)
             else:
-                s.get(cfg.bark_url, params={"title": title, "body": detail}, timeout=15)
+                try:
+                    r = s.get(cfg.bark_url, params={"title": title, "body": detail}, timeout=15)
+                    log.info("[通知] Bark %s: %s", r.status_code, r.text[:60])
+                except Exception as e:
+                    log.warning("[通知] Bark 发送异常: %s", e)
     except Exception as e:  # 通知失败不影响主流程
         log.warning("通知发送失败: %s", e)
 
