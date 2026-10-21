@@ -212,11 +212,14 @@ def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.
 
     返回 (session, referer)。referer 是带 token 的活动页地址，后续 API 都要带。
 
-    凭证策略（实测结论）：
+    凭证策略（实测结论，2026-10-21 更新）：
     - jwt 是账号级长期凭证：appTokenLogin 请求里 jwtToken 优先于 token 字段，
-      服务端校验通过 jwt 即签发会话（使用 jwt 时 token 字段可留空），
-      且不受 App 内切换登录影响；
-    - 因此优先用缓存 jwt 免票据续期，app_token 仅在 jwt 缺失/失效时作引导兜底；
+      服务端校验通过 jwt 即签发会话，且不受 App 内切换登录影响；
+    - 2026-10-20 起服务端收紧了校验：只带 jwt（token 字段留空）的续期会被拒，
+      返回 FAILED / APP登录状态已过期（见 issue #15），此时"免票据续期"这条路
+      已走不通；实测 jwt 与 app_token 一起发即可续期成功；
+    - 因此续期依次尝试三条路径：jwt+app_token → jwt 单独 → 纯 app_token 引导，
+      兼顾服务端恢复 jwt 单独续期、或 app_token 先于 jwt 失效的情况；
     - 每次登录响应都会重签 jwt，总是回写缓存保持最新。
     """
     s = requests.Session()
@@ -247,17 +250,21 @@ def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.
     cached = load_jwt_cache(cfg)
     if cached:
         jwt_str, jwt_first_seen = cached
-        r = s.post(login_url, json={**base_body, "jwtToken": jwt_str, "token": ""}, timeout=30)
-        try:
-            cand = r.json()
-        except ValueError:
-            cand = {}
-        if cand.get("code") == "SUCCESS":
-            resp = cand
-            log.info("jwt 续期成功（未使用 app_token，凭证链已 %.1f 天）",
-                     (time.time() - jwt_first_seen) / 86400)
-        else:
-            log.info("jwt 续期失败(%s)，回落 appTokenLogin 引导", cand.get("msg"))
+        # 2026-10-20 服务端不再接受"只带 jwt"（token 留空）的续期，报 APP登录状态已过期
+        # （见 issue #15）。实测把 app_token 一起发即可续期成功，故优先这样试；
+        # 仍保留"只带 jwt"作为第二次尝试，以便服务端恢复该口子或 app_token 先失效时仍能续期。
+        for label, tok in (("jwt+app_token", cfg.app_token or ""), ("jwt 单独", "")):
+            r = s.post(login_url, json={**base_body, "jwtToken": jwt_str, "token": tok}, timeout=30)
+            try:
+                cand = r.json()
+            except ValueError:
+                cand = {}
+            if cand.get("code") == "SUCCESS":
+                resp = cand
+                log.info("jwt 续期成功（%s，凭证链已 %.1f 天）",
+                         label, (time.time() - jwt_first_seen) / 86400)
+                break
+            log.info("jwt 续期失败[%s](%s)", label, cand.get("msg"))
 
     # ③ 回落：app_token 引导登录（首次配置或 jwt 失效后）
     if resp is None:

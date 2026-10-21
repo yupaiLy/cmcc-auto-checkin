@@ -40,7 +40,14 @@ python3 cmcc_sign.py --dry-run          # 或先只查状态，不做任何操�
 
 ![appToken 抓包位置示例](images/app-token-capture.png)
 
-脚本会自动用 `app_token` 登录并续签一个长期凭证（jwt），之后每次运行优先用 jwt 续期，**App 内切换登录也不影响**。只有当脚本同时推送「jwt 续期失败」和「登录失败」时，才需要重新抓包更新 `app_token`。凭证属于账号敏感信息，只在本地使用，切勿外传。
+脚本会自动用 `app_token` 登录并续签一个长期凭证（jwt），之后每次运行优先用 jwt 续期，**App 内切换登录也不影响**。凭证属于账号敏感信息，只在本地使用，切勿外传。
+
+> **2026-10-20 起**：服务端收紧了登录校验，只带 jwt（`token` 字段留空）的续期请求会被拒
+> （`APP登录状态已过期`，见 [#15](https://github.com/yupaiLy/cmcc-auto-checkin/issues/15)）。
+> 脚本已改为「jwt + app_token 一起发」续期，日常运行不受影响。
+> **判断是否需要重新抓包，请以日志里的 `appTokenLogin 失败` 为准**——只有它出现才代表
+> `app_token` 真的过期；单独的 `jwt 续期失败` 会被脚本自动兜住（继续回落 appTokenLogin），
+> 看到它并不代表凭证失效。
 
 ## 配置说明
 
