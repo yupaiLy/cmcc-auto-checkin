@@ -262,7 +262,7 @@ def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.
     # ③ 回落：app_token 引导登录（首次配置或 jwt 失效后）
     if resp is None:
         r = s.post(login_url, json={**base_body, "jwtToken": None, "token": cfg.app_token}, timeout=30)
-        resp = r.json()
+        resp = json_obj(r, "appTokenLogin")
         if resp.get("code") != "SUCCESS":
             # App 票据失效是脚本唯一的"需要人工介入"场景
             raise RuntimeError(
@@ -270,7 +270,9 @@ def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.
                 "通常是 app_token 过期，请重新抓包更新凭证"
             )
 
-    data = resp["data"]
+    data = resp.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"appTokenLogin 返回的 data 不是对象: {str(data)[:200]!r}")
     save_jwt_cache(cfg, data.get("jwt"))
 
     # ③ 访问带 token 的活动页，服务器 Set-Cookie: QWHD_SESSION_TOKEN
@@ -289,19 +291,44 @@ def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.
 
 # ---------------------------------------------------------------- 业务接口
 
+
+def json_obj(r, what: str) -> dict:
+    """把响应体解析成 dict，失败时抛带上下文的 RuntimeError。
+
+    2026-10-21 实测：上游在某些时刻会返回**裸 JSON 字符串**（如 "系统繁忙"）或
+    非 JSON 文本，而不是对象。此时 `r.json()` 的结果是 str，后续 `.get("code")`
+    会炸出 'str' object has no attribute 'get' —— 报错完全看不出是哪个接口、
+    什么内容降级了。这里统一拦截并带上原始 body 前 200 字符。
+    """
+    try:
+        data = r.json()
+    except ValueError as e:
+        raise RuntimeError(
+            f"{what} 返回非 JSON: HTTP {r.status_code} "
+            f"content-type={r.headers.get('Content-Type')} body={r.text[:200]!r}"
+        ) from e
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"{what} 返回非对象: HTTP {r.status_code} "
+            f"type={type(data).__name__} body={str(data)[:200]!r}"
+        )
+    return data
+
+
 def query_markstatus(s: requests.Session, referer: str) -> dict:
     r = s.post(f"{API_MARK}/mark31/markstatus", json={}, headers=api_headers(referer), timeout=30)
     r.raise_for_status()
-    resp = r.json()
+    resp = json_obj(r, "markstatus")
     if resp.get("code") != "SUCCESS":
         raise PermissionError(f"markstatus 失败: {resp.get('code')} {resp.get('msg')}")
-    return resp["data"]
+    data = resp.get("data")
+    return data if isinstance(data, dict) else {}
 
 
 def do_mark(s: requests.Session, referer: str, date: str) -> dict:
     r = s.post(f"{API_MARK}/mark31/domark", json={"date": date}, headers=api_headers(referer), timeout=30)
     r.raise_for_status()
-    return r.json()
+    return json_obj(r, "domark")
 
 
 def claim_task_awards(s: requests.Session, referer: str, status_data: dict) -> list[str]:
@@ -342,8 +369,9 @@ def claim_task_awards(s: requests.Session, referer: str, status_data: dict) -> l
         if not tid:
             continue
         r = s.post(f"{API_MARK}/mark31/taskAward/{tid}", json={}, headers=api_headers(referer), timeout=30)
-        resp = r.json()
-        data = resp.get("data") or {}
+        resp = json_obj(r, f"taskAward/{tid}")
+        data = resp.get("data")
+        data = data if isinstance(data, dict) else {}
         # status 为 None 时回落到 code（实测领奖成功响应 status 可能为空）；
         # 成功领取时 data 带 prizeName/prizeValue，直接展示领到了什么
         if isinstance(data, dict) and data.get("prizeName"):

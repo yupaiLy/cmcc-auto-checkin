@@ -32,3 +32,11 @@ scripts/checkin.sh
 scripts/install-launchd.sh
 .cmcc_ticket_cache*.json
 .cmcc_ticket_meta*.json
+# 本地备份与凭证残留
+*.bak
+*.bak-*
+config.json.bak*
+.patches/
+
+# 探针运行数据（非凭证，但属运行产物）
+.cmcc_app_token_probe.jsonl
